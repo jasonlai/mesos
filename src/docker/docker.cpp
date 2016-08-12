@@ -101,6 +101,7 @@ static Future<Nothing> checkError(const string& cmd, const Subprocess& s)
 Try<Owned<Docker>> Docker::create(
     const string& path,
     const string& socket,
+    bool enableCfs,
     bool validate,
     const Option<JSON::Object>& config)
 {
@@ -108,7 +109,7 @@ Try<Owned<Docker>> Docker::create(
     return Error("Invalid Docker socket path: " + socket);
   }
 
-  Owned<Docker> docker(new Docker(path, socket, config));
+  Owned<Docker> docker(new Docker(path, socket, enableCfs, config));
   if (!validate) {
     return docker;
   }
@@ -522,6 +523,14 @@ Future<Option<int>> Docker::run(
         std::max((uint64_t) (CPU_SHARES_PER_CPU * cpus.get()), MIN_CPU_SHARES);
       argv.push_back("--cpu-shares");
       argv.push_back(stringify(cpuShare));
+
+      if (enableCfs) {
+        Duration quota =
+          std::max(CPU_CFS_PERIOD * cpus.get(), MIN_CPU_CFS_QUOTA);
+
+        argv.push_back("--cpu-quota");
+        argv.push_back(stringify(stringify(static_cast<uint64_t>(quota.us()))));
+      }
     }
 
     Option<Bytes> mem = resources.get().mem();

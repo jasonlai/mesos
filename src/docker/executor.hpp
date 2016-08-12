@@ -74,6 +74,12 @@ struct Flags : public mesos::internal::logging::Flags
         "task_environment",
         "A JSON map of environment variables and values that should\n"
         "be passed into the task launched by this executor.");
+
+    add(&cgroups_enable_cfs,
+        "cgroups_enable_cfs",
+        "Cgroups feature flag to enable hard limits on CPU resources\n"
+        "via the CFS bandwidth limiting subfeature.\n",
+        false);
   }
 
   Option<std::string> container;
@@ -83,6 +89,8 @@ struct Flags : public mesos::internal::logging::Flags
   Option<std::string> mapped_directory;
   Option<std::string> launcher_dir;
   Option<std::string> task_environment;
+
+  bool cgroups_enable_cfs;
 
   // TODO(alexr): Remove this after the deprecation cycle (started in 1.0).
   Option<Duration> stop_timeout;

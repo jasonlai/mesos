@@ -145,6 +145,11 @@ Try<DockerContainerizer*> DockerContainerizer::create(
   Try<Owned<Docker>> create = Docker::create(
       flags.docker,
       flags.docker_socket,
+#ifdef __linux__
+      flags.cgroups_enable_cfs,
+#else
+      false,  // No cfs quota available on non-linux.
+#endif
       true,
       flags.docker_config);
 
@@ -162,6 +167,17 @@ Try<DockerContainerizer*> DockerContainerizer::create(
       return Error(message);
     }
   }
+
+#ifdef __linux__
+  if (flags.cgroups_enable_cfs) {
+    Try<Nothing> validateResult = docker->validateVersion(Version(1, 7, 0));
+    if (validateResult.isError()) {
+      string message = "Docker with CFS support requires docker 1.7+";
+      message += validateResult.error();
+      return Error(message);
+    }
+  }
+#endif
 
   // TODO(tnachen): We should also mark the work directory as shared
   // mount here, more details please refer to MESOS-3483.
@@ -222,6 +238,9 @@ docker::Flags dockerFlags(
   dockerFlags.mapped_directory = flags.sandbox_directory;
   dockerFlags.docker_socket = flags.docker_socket;
   dockerFlags.launcher_dir = flags.launcher_dir;
+#ifdef __linux__
+  dockerFlags.cgroups_enable_cfs = flags.cgroups_enable_cfs;
+#endif
 
   if (taskEnvironment.isSome()) {
     dockerFlags.task_environment = string(jsonify(taskEnvironment.get()));

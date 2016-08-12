@@ -804,6 +804,7 @@ int main(int argc, char** argv)
   Try<Owned<Docker>> docker = Docker::create(
       flags.docker.get(),
       flags.docker_socket.get(),
+      flags.cgroups_enable_cfs,
       false);
 
   if (docker.isError()) {

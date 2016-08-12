@@ -48,6 +48,7 @@ public:
   static Try<process::Owned<Docker>> create(
       const std::string& path,
       const std::string& socket,
+      bool enableCfs = false,
       bool validate = true,
       const Option<JSON::Object>& config = None());
 
@@ -210,9 +211,11 @@ protected:
   // Uses the specified path to the Docker CLI tool.
   Docker(const std::string& _path,
          const std::string& _socket,
+         const bool _enableCfs,
          const Option<JSON::Object>& _config)
        : path(_path),
          socket("unix://" + _socket),
+         enableCfs(_enableCfs),
          config(_config) {}
 
 private:
@@ -306,6 +309,7 @@ private:
 
   const std::string path;
   const std::string socket;
+  const bool enableCfs;
   const Option<JSON::Object> config;
 };
 

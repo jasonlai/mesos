@@ -643,7 +643,7 @@ MockDocker::MockDocker(
     const string& path,
     const string& socket,
     const Option<JSON::Object>& config)
-  : Docker(path, socket, config)
+  : Docker(path, socket, false, config)
 {
   EXPECT_CALL(*this, ps(_, _))
     .WillRepeatedly(Invoke(this, &MockDocker::_ps));
