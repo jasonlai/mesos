@@ -50,7 +50,8 @@ public:
       const string& rootfs,
       const string& backendDir);
 
-  Future<bool> destroy(const string& rootfs);
+  Future<bool> destroy(
+      const string& rootfs);
 };
 
 
@@ -101,7 +102,9 @@ Future<Nothing> AufsBackend::provision(
       backendDir);
 }
 
-Future<bool> AufsBackend::destroy(const string& rootfs)
+Future<bool> AufsBackend::destroy(
+    const string& rootfs,
+    const string& backendDir)
 {
   return dispatch(process.get(), &AufsBackendProcess::destroy, rootfs);
 }

@@ -113,9 +113,22 @@ TEST_F(OverlayBackendTest, ROOT_OVERLAYFS_OverlayFSBackend)
   EXPECT_SOME_EQ("test3", os::read(path::join(rootfs, "file")));
   EXPECT_SOME_EQ("test2", os::read(path::join(layer2, "file")));
 
-  AWAIT_READY(backends["overlay"]->destroy(rootfs));
+  // "links" in backendDir should be a symlink.
+  const string symlink = path::join(sandbox.get(), "links");
+  ASSERT_TRUE(os::stat::islink(symlink));
+  const string realpath = os::realpath(symlink).get();
+  const string link1 = path::join(realpath, "0");
+  ASSERT_TRUE(os::stat::islink(link1));
+  EXPECT_EQ(layer1, os::realpath(link1).get());
+  const string link2 = path::join(realpath, "1");
+  ASSERT_TRUE(os::stat::islink(link2));
+  EXPECT_EQ(layer2, os::realpath(link2).get());
+
+  AWAIT_READY(backends["overlay"]->destroy(rootfs, sandbox.get()));
 
   EXPECT_FALSE(os::exists(rootfs));
+  EXPECT_FALSE(os::exists(realpath));
+  EXPECT_FALSE(os::exists(symlink));
 }
 
 
@@ -150,7 +163,7 @@ TEST_F(BindBackendTest, ROOT_BindBackend)
   EXPECT_TRUE(os::Permissions(mode.get()).owner.w);
   EXPECT_ERROR(os::write(path::join(target, "tmp", "test"), "data"));
 
-  AWAIT_READY(backends["bind"]->destroy(target));
+  AWAIT_READY(backends["bind"]->destroy(target, sandbox.get()));
 
   EXPECT_FALSE(os::exists(target));
 }
@@ -201,7 +214,7 @@ TEST_F(AufsBackendTest, ROOT_AUFS_AufsBackend)
   EXPECT_SOME_EQ("test3", os::read(path::join(rootfs, "file")));
   EXPECT_SOME_EQ("test2", os::read(path::join(layer2, "file")));
 
-  AWAIT_READY(backends["aufs"]->destroy(rootfs));
+  AWAIT_READY(backends["aufs"]->destroy(rootfs, sandbox.get()));
 
   EXPECT_FALSE(os::exists(rootfs));
 }
@@ -246,7 +259,7 @@ TEST_F(CopyBackendTest, ROOT_CopyBackend)
   EXPECT_TRUE(os::exists(path::join(rootfs, "file")));
   EXPECT_SOME_EQ("test2", os::read(path::join(rootfs, "file")));
 
-  AWAIT_READY(backends["copy"]->destroy(rootfs));
+  AWAIT_READY(backends["copy"]->destroy(rootfs, sandbox.get()));
 
   EXPECT_FALSE(os::exists(rootfs));
 }
