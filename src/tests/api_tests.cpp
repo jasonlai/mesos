@@ -1498,6 +1498,261 @@ TEST_P(MasterAPITest, SubscribeAgentEvents)
 }
 
 
+// This test checks that recovered but yet to reregistered agents are returned
+// in `recovered` field of `GetAgents` response as well as initial response
+// of event stream, and upon reregistering an `AGENT_ADDED` event is received.
+TEST_P(MasterAPITest, GetRecoveredAgents)
+{
+  // Step 1: Start a master.
+  master::Flags masterFlags = CreateMasterFlags();
+  Try<Owned<cluster::Master>> master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  // Step 2: Start a slave.
+  Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+    FUTURE_PROTOBUF(SlaveRegisteredMessage(), master.get()->pid, _);
+
+  // Reuse slaveFlags so both StartSlave() use the same work_dir.
+  slave::Flags slaveFlags = this->CreateSlaveFlags();
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+  Try<Owned<cluster::Slave>> slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(slaveRegisteredMessage);
+
+  v1::AgentID agentId = evolve(slaveRegisteredMessage.get().slave_id());
+
+  // Step 3: Make sure the agent is shown in `GetAgent.agents` while
+  // `recovered_agents` is empty.
+  {
+    v1::master::Call v1Call;
+    v1Call.set_type(v1::master::Call::GET_AGENTS);
+
+    ContentType contentType = GetParam();
+
+    Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::master::Response::GET_AGENTS, v1Response.get().type());
+    ASSERT_EQ(1, v1Response.get().get_agents().agents_size());
+    ASSERT_EQ(agentId,
+              v1Response.get().get_agents().agents(0).agent_info().id());
+    ASSERT_EQ(0, v1Response.get().get_agents().recovered_agents_size());
+  }
+
+  // Step 4: Stop the slave while the master is down.
+  master->reset();
+  slave.get()->terminate();
+  slave->reset();
+
+  // Step 5: Restart the master.
+  master = StartMaster(masterFlags);
+  ASSERT_SOME(master);
+
+  // Step 6: Expect seeing the agent id in `recovered_agents` field of
+  // `GetAgents` and `recovered_slaves` in both `/state` and `/slaves`
+  // endpoints.
+  {
+    v1::master::Call v1Call;
+    v1Call.set_type(v1::master::Call::GET_AGENTS);
+
+    ContentType contentType = GetParam();
+
+    Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::master::Response::GET_AGENTS, v1Response.get().type());
+    ASSERT_EQ(0u, v1Response.get().get_agents().agents_size());
+    ASSERT_EQ(1u, v1Response.get().get_agents().recovered_agents_size());
+    ASSERT_EQ(agentId, v1Response.get().get_agents().recovered_agents(0).id());
+  }
+
+  {
+    // `/state` endpoint should not show any `slaves` and only one
+    // `recovered_slaves`.
+    Future<Response> response1 = process::http::get(
+        master.get()->pid,
+        "state",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response1);
+    AWAIT_EXPECT_RESPONSE_HEADER_EQ(
+        APPLICATION_JSON, "Content-Type", response1);
+
+    Try<JSON::Object> parse1 = JSON::parse<JSON::Object>(response1.get().body);
+    Result<JSON::Array> array1 = parse1.get().find<JSON::Array>("slaves");
+    ASSERT_SOME(array1);
+    EXPECT_EQ(0u, array1.get().values.size());
+
+    Result<JSON::Array> array2 =
+      parse1.get().find<JSON::Array>("recovered_slaves");
+    ASSERT_SOME(array2);
+    EXPECT_EQ(1u, array2.get().values.size());
+  }
+
+  {
+    // `/slaves` endpoint should not show any `slaves` and only one
+    // `recovered_slaves`.
+    Future<Response> response1 = process::http::get(
+        master.get()->pid,
+        "slaves",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response1);
+    AWAIT_EXPECT_RESPONSE_HEADER_EQ(
+        APPLICATION_JSON, "Content-Type", response1);
+
+    Try<JSON::Object> parse1 = JSON::parse<JSON::Object>(response1.get().body);
+    Result<JSON::Array> array1 = parse1.get().find<JSON::Array>("slaves");
+    ASSERT_SOME(array1);
+    EXPECT_EQ(0u, array1.get().values.size());
+
+    Result<JSON::Array> array2 =
+      parse1.get().find<JSON::Array>("recovered_slaves");
+    ASSERT_SOME(array2);
+    EXPECT_EQ(1u, array2.get().values.size());
+  }
+
+  // Step 7: Create an event stream subscriber and expect
+  // seeing agentId in `recovered_agents`.
+  ContentType contentType = GetParam();
+  v1::master::Call subscribeCall;
+  subscribeCall.set_type(v1::master::Call::SUBSCRIBE);
+
+  process::http::Headers headers = createBasicAuthHeaders(DEFAULT_CREDENTIAL);
+
+  headers["Accept"] = stringify(contentType);
+
+  Future<Response> response = process::http::streaming::post(
+      master.get()->pid,
+      "api/v1",
+      headers,
+      serialize(contentType, subscribeCall),
+      stringify(contentType));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response);
+  AWAIT_EXPECT_RESPONSE_HEADER_EQ("chunked", "Transfer-Encoding", response);
+  ASSERT_EQ(Response::PIPE, response.get().type);
+  ASSERT_SOME(response->reader);
+
+  Pipe::Reader reader = response->reader.get();
+
+  auto deserializer =
+    lambda::bind(deserialize<v1::master::Event>, contentType, lambda::_1);
+
+  Reader<v1::master::Event> decoder(
+      Decoder<v1::master::Event>(deserializer), reader);
+
+  Future<Result<v1::master::Event>> event = decoder.read();
+  AWAIT_READY(event);
+
+  EXPECT_EQ(v1::master::Event::SUBSCRIBED, event.get().get().type());
+
+  const v1::master::Response::GetState& getState =
+      event.get().get().subscribed().get_state();
+
+  EXPECT_EQ(0u, getState.get_agents().agents_size());
+  EXPECT_EQ(1u, getState.get_agents().recovered_agents_size());
+  EXPECT_EQ(agentId, getState.get_agents().recovered_agents(0).id());
+
+  // Step 8: Reregistered the agent.
+  Future<SlaveReregisteredMessage> slaveReregisteredMessage =
+    FUTURE_PROTOBUF(SlaveReregisteredMessage(), master.get()->pid, _);
+
+  detector = master.get()->createDetector();
+  slave = StartSlave(detector.get(), slaveFlags);
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(slaveReregisteredMessage);
+
+  // Step 9: Check that we received the `AGENT_ADDED` event.
+  event = decoder.read();
+  AWAIT_READY(event);
+
+  {
+    ASSERT_EQ(v1::master::Event::AGENT_ADDED, event.get().get().type());
+
+    const v1::master::Response::GetAgents::Agent& agent =
+      event.get().get().agent_added().agent();
+
+    ASSERT_EQ(agentId, agent.agent_info().id());
+  }
+
+  // Step 10: Expect that `recovered_agents` field of `GetAgents` and
+  // `recovered_slaves` in both `/state` and `/slaves` endpoints are both empty.
+  {
+    v1::master::Call v1Call;
+    v1Call.set_type(v1::master::Call::GET_AGENTS);
+
+    ContentType contentType = GetParam();
+
+    Future<v1::master::Response> v1Response =
+      post(master.get()->pid, v1Call, contentType);
+
+    AWAIT_READY(v1Response);
+    ASSERT_TRUE(v1Response.get().IsInitialized());
+    ASSERT_EQ(v1::master::Response::GET_AGENTS, v1Response.get().type());
+    ASSERT_EQ(1u, v1Response.get().get_agents().agents_size());
+    ASSERT_EQ(0u, v1Response.get().get_agents().recovered_agents_size());
+  }
+
+  {
+    // `/state` endpoint should not show any `recovered_slaves` and only one
+    // `slaves`.
+    Future<Response> response1 = process::http::get(
+        master.get()->pid,
+        "state",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response1);
+    AWAIT_EXPECT_RESPONSE_HEADER_EQ(
+        APPLICATION_JSON, "Content-Type", response1);
+
+    Try<JSON::Object> parse1 = JSON::parse<JSON::Object>(response1.get().body);
+    Result<JSON::Array> array1 = parse1.get().find<JSON::Array>("slaves");
+    ASSERT_SOME(array1);
+    EXPECT_EQ(1u, array1.get().values.size());
+
+    Result<JSON::Array> array2 =
+      parse1.get().find<JSON::Array>("recovered_slaves");
+    ASSERT_SOME(array2);
+    EXPECT_EQ(0u, array2.get().values.size());
+  }
+
+  {
+    // `/slaves` endpoint should not show any `recovered_slaves` and only one
+    // `slaves`.
+    Future<Response> response1 = process::http::get(
+        master.get()->pid,
+        "slaves",
+        None(),
+        createBasicAuthHeaders(DEFAULT_CREDENTIAL));
+
+    AWAIT_EXPECT_RESPONSE_STATUS_EQ(OK().status, response1);
+    AWAIT_EXPECT_RESPONSE_HEADER_EQ(
+        APPLICATION_JSON, "Content-Type", response1);
+
+    Try<JSON::Object> parse1 = JSON::parse<JSON::Object>(response1.get().body);
+    Result<JSON::Array> array1 = parse1.get().find<JSON::Array>("slaves");
+    ASSERT_SOME(array1);
+    EXPECT_EQ(1u, array1.get().values.size());
+
+    Result<JSON::Array> array2 =
+      parse1.get().find<JSON::Array>("recovered_slaves");
+    ASSERT_SOME(array2);
+    EXPECT_EQ(0u, array2.get().values.size());
+  }
+}
+
+
 // This test tries to verify that a client subscribed to the 'api/v1'
 // endpoint is able to receive `TASK_ADDED`/`TASK_UPDATED` events.
 TEST_P(MasterAPITest, Subscribe)
