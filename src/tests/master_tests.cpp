@@ -1825,7 +1825,8 @@ TEST_F(MasterTest, SlavesEndpointWithoutSlaves)
 
   Try<JSON::Value> expected = JSON::parse(
       "{"
-      "  \"slaves\" : []"
+      "  \"slaves\" : [],"
+      "  \"recovered_slaves\" : []"
       "}");
 
   ASSERT_SOME(expected);
