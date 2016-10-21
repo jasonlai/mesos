@@ -23,9 +23,12 @@
 
 #include <mesos/slave/container_logger.hpp>
 
+#include <process/metrics/metrics.hpp>
+#include <process/metrics/timer.hpp>
 #include <process/owned.hpp>
 #include <process/shared.hpp>
 
+#include <stout/duration.hpp>
 #include <stout/flags.hpp>
 #include <stout/hashset.hpp>
 
@@ -125,7 +128,16 @@ public:
     : flags(_flags),
       fetcher(_fetcher),
       logger(_logger),
-      docker(_docker) {}
+      docker(_docker),
+      pullTimer("containerizer/docker/pull", Hours(1))
+  {
+    process::metrics::add(pullTimer);
+  }
+
+  virtual ~DockerContainerizerProcess()
+  {
+    process::metrics::remove(pullTimer);
+  }
 
   virtual process::Future<Nothing> recover(
       const Option<state::SlaveState>& state);
@@ -265,6 +277,8 @@ private:
   process::Owned<mesos::slave::ContainerLogger> logger;
 
   process::Shared<Docker> docker;
+
+  process::metrics::Timer<Milliseconds> pullTimer;
 
   struct Container
   {
