@@ -1620,7 +1620,7 @@ private:
     // Slaves that have been recovered from the registrar but have yet
     // to re-register. We use `recoveredTimer` above to ensure we
     // remove these slaves if they do not re-register.
-    hashset<SlaveID> recovered;
+    hashmap<SlaveID, SlaveInfo> recovered;
 
     // Slaves that are in the process of registering.
     hashset<process::UPID> registering;
