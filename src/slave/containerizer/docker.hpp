@@ -24,9 +24,12 @@
 
 #include <mesos/slave/container_logger.hpp>
 
+#include <process/metrics/metrics.hpp>
+#include <process/metrics/timer.hpp>
 #include <process/owned.hpp>
 #include <process/shared.hpp>
 
+#include <stout/duration.hpp>
 #include <stout/flags.hpp>
 #include <stout/hashset.hpp>
 
@@ -132,7 +135,16 @@ public:
       fetcher(_fetcher),
       logger(_logger),
       docker(_docker),
-      nvidia(_nvidia) {}
+      nvidia(_nvidia),
+      pullTimer("containerizer/docker/pull", Hours(1))
+  {
+    process::metrics::add(pullTimer);
+  }
+
+  virtual ~DockerContainerizerProcess()
+  {
+    process::metrics::remove(pullTimer);
+  }
 
   virtual process::Future<Nothing> recover(
       const Option<state::SlaveState>& state);
@@ -301,6 +313,8 @@ private:
   process::Shared<Docker> docker;
 
   Option<NvidiaComponents> nvidia;
+
+  process::metrics::Timer<Milliseconds> pullTimer;
 
   struct Container
   {

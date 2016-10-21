@@ -440,6 +440,7 @@ Future<Nothing> DockerContainerizerProcess::pull(
     container->forcePullImage());
 
   containers_.at(containerId)->pull = future;
+  pullTimer.time(future);
 
   return future.then(defer(self(), [=]() {
     VLOG(1) << "Docker pull " << image << " completed";
