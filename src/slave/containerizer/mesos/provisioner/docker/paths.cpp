@@ -40,9 +40,15 @@ string getStagingTempDir(const string& storeDir)
 }
 
 
+string getImageLayersRoot(const string& storeDir)
+{
+  return path::join(storeDir, "layers");
+}
+
+
 string getImageLayerPath(const string& storeDir, const string& layerId)
 {
-  return path::join(storeDir, "layers", layerId);
+  return path::join(getImageLayersRoot(storeDir), layerId);
 }
 
 

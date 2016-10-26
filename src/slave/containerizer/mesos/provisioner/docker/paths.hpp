@@ -49,6 +49,9 @@ std::string getStagingDir(const std::string& storeDir);
 std::string getStagingTempDir(const std::string& storeDir);
 
 
+std::string getImageLayersRoot(const std::string& storeDir);
+
+
 std::string getImageLayerPath(
     const std::string& storeDir,
     const std::string& layerId);
