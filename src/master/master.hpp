@@ -1898,6 +1898,11 @@ private:
   double _tasks_running();
   double _tasks_killing();
 
+  double _subscribers_active()
+  {
+    return subscribers.subscribed.size();
+  }
+
   double _resources_total(const std::string& name);
   double _resources_used(const std::string& name);
   double _resources_percent(const std::string& name);

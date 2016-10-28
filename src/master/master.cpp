@@ -8292,6 +8292,9 @@ void Master::exited(const UUID& id)
   }
 
   subscribers.subscribed.erase(id);
+
+  LOG(INFO) << "Removed subscriber: " << id << " from the "
+            << "list of active subscribers";
 }
 
 
