@@ -19,6 +19,7 @@
 
 #include <glog/logging.h>
 
+#include <stout/duration.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/json.hpp>
 #include <stout/os.hpp>
@@ -27,6 +28,10 @@
 #include <process/defer.hpp>
 #include <process/dispatch.hpp>
 #include <process/id.hpp>
+#include <process/metrics/counter.hpp>
+#include <process/metrics/gauge.hpp>
+#include <process/metrics/metrics.hpp>
+#include <process/metrics/timer.hpp>
 
 #include <mesos/docker/spec.hpp>
 
@@ -60,9 +65,24 @@ public:
     : ProcessBase(process::ID::generate("docker-provisioner-store")),
       flags(_flags),
       metadataManager(_metadataManager),
-      puller(_puller) {}
+      puller(_puller),
+      layers(
+          "containerizer/mesos/docker_store/layers",
+          defer(self(), &StoreProcess::_layers)),
+      layersPulled("containerizer/mesos/docker_store/layers_pulled"),
+      pullTimer("containerizer/mesos/docker_store/pull", Hours(1))
+  {
+    process::metrics::add(layers);
+    process::metrics::add(layersPulled);
+    process::metrics::add(pullTimer);
+  }
 
-  ~StoreProcess() {}
+  ~StoreProcess()
+  {
+    process::metrics::remove(layers);
+    process::metrics::remove(layersPulled);
+    process::metrics::remove(pullTimer);
+  }
 
   Future<Nothing> recover();
 
@@ -83,11 +103,17 @@ private:
       const string& staging,
       const string& layerId);
 
+  Future<double> _layers();
+
   const Flags flags;
 
   Owned<MetadataManager> metadataManager;
   Owned<Puller> puller;
   hashmap<string, Owned<Promise<Image>>> pulling;
+
+  process::metrics::Gauge layers;
+  process::metrics::Counter layersPulled;
+  process::metrics::Timer<Milliseconds> pullTimer;
 };
 
 
@@ -228,7 +254,8 @@ Future<Image> StoreProcess::_get(
   if (!pulling.contains(name)) {
     Owned<Promise<Image>> promise(new Promise<Image>());
 
-    Future<Image> future = puller->pull(reference, staging.get())
+    Future<Image> future =
+      pullTimer.time(puller->pull(reference, staging.get()))
       .then(defer(self(), &Self::moveLayers, staging.get(), lambda::_1))
       .then(defer(self(), [=](const vector<string>& layerIds) {
         return metadataManager->put(reference, layerIds);
@@ -346,6 +373,8 @@ Future<Nothing> StoreProcess::moveLayer(
           "Failed to move layer from '" + source +
           "' to '" + target + "': " + rename.error());
     }
+
+    layersPulled++;
   } else {
     // This is the case where the layer has already been pulled with a
     // different backend.
@@ -362,6 +391,20 @@ Future<Nothing> StoreProcess::moveLayer(
   }
 
   return Nothing();
+}
+
+
+Future<double> StoreProcess::_layers()
+{
+  const string layersRootDir =
+    paths::getImageLayersRoot(flags.docker_store_dir);
+  Try<list<string>> layerIds = os::ls(layersRootDir);
+  if (layerIds.isError()) {
+      return Failure(
+          "Failed to list docker store layers in '" + layersRootDir +
+          "': " + layerIds.error());
+  }
+  return layerIds.get().size();
 }
 
 } // namespace docker {
