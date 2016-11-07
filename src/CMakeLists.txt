@@ -160,12 +160,17 @@ set(LINUX_SRC
   slave/containerizer/mesos/isolators/appc/runtime.cpp
   slave/containerizer/mesos/isolators/cgroups/cgroups.cpp
   slave/containerizer/mesos/isolators/cgroups/subsystem.cpp
+  slave/containerizer/mesos/isolators/cgroups/subsystems/blkio.cpp
   slave/containerizer/mesos/isolators/cgroups/subsystems/cpu.cpp
   slave/containerizer/mesos/isolators/cgroups/subsystems/cpuacct.cpp
+  slave/containerizer/mesos/isolators/cgroups/subsystems/cpuset.cpp
   slave/containerizer/mesos/isolators/cgroups/subsystems/devices.cpp
+  slave/containerizer/mesos/isolators/cgroups/subsystems/hugetlb.cpp
   slave/containerizer/mesos/isolators/cgroups/subsystems/memory.cpp
   slave/containerizer/mesos/isolators/cgroups/subsystems/net_cls.cpp
+  slave/containerizer/mesos/isolators/cgroups/subsystems/net_prio.cpp
   slave/containerizer/mesos/isolators/cgroups/subsystems/perf_event.cpp
+  slave/containerizer/mesos/isolators/cgroups/subsystems/pid.cpp
   slave/containerizer/mesos/isolators/docker/runtime.cpp
   slave/containerizer/mesos/isolators/docker/volume/driver.cpp
   slave/containerizer/mesos/isolators/docker/volume/isolator.cpp
