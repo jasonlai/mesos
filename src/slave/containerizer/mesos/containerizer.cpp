@@ -304,7 +304,7 @@ Try<MesosContainerizer*> MesosContainerizer::create(
     {"cgroups/net_cls", &CgroupsIsolatorProcess::create},
     {"cgroups/net_prio", &CgroupsIsolatorProcess::create},
     {"cgroups/perf_event", &CgroupsIsolatorProcess::create},
-    {"cgroups/pid", &CgroupsIsolatorProcess::create},
+    {"cgroups/pids", &CgroupsIsolatorProcess::create},
     {"appc/runtime", &AppcRuntimeIsolatorProcess::create},
     {"docker/runtime", &DockerRuntimeIsolatorProcess::create},
     {"docker/volume", &DockerVolumeIsolatorProcess::create},

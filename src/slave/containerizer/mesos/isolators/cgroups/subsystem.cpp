@@ -30,7 +30,7 @@
 #include "slave/containerizer/mesos/isolators/cgroups/subsystems/net_cls.hpp"
 #include "slave/containerizer/mesos/isolators/cgroups/subsystems/net_prio.hpp"
 #include "slave/containerizer/mesos/isolators/cgroups/subsystems/perf_event.hpp"
-#include "slave/containerizer/mesos/isolators/cgroups/subsystems/pid.hpp"
+#include "slave/containerizer/mesos/isolators/cgroups/subsystems/pids.hpp"
 
 using mesos::slave::ContainerLimitation;
 
@@ -60,7 +60,7 @@ Try<Owned<Subsystem>> Subsystem::create(
     {CGROUP_SUBSYSTEM_NET_CLS_NAME, &NetClsSubsystem::create},
     {CGROUP_SUBSYSTEM_NET_PRIO_NAME, &NetPrioSubsystem::create},
     {CGROUP_SUBSYSTEM_PERF_EVENT_NAME, &PerfEventSubsystem::create},
-    {CGROUP_SUBSYSTEM_PID_NAME, &PidSubsystem::create},
+    {CGROUP_SUBSYSTEM_PIDS_NAME, &PidsSubsystem::create},
   };
 
   if (!creators.contains(name)) {

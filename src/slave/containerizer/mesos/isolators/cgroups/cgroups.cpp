@@ -87,7 +87,7 @@ Try<Isolator*> CgroupsIsolatorProcess::create(const Flags& flags)
     {"net_cls", CGROUP_SUBSYSTEM_NET_CLS_NAME},
     {"net_prio", CGROUP_SUBSYSTEM_NET_PRIO_NAME},
     {"perf_event", CGROUP_SUBSYSTEM_PERF_EVENT_NAME},
-    {"pid", CGROUP_SUBSYSTEM_PID_NAME},
+    {"pids", CGROUP_SUBSYSTEM_PIDS_NAME},
   };
 
   foreach (string isolator, strings::tokenize(flags.isolation, ",")) {

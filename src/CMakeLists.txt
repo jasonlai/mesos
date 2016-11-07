@@ -170,7 +170,7 @@ set(LINUX_SRC
   slave/containerizer/mesos/isolators/cgroups/subsystems/net_cls.cpp
   slave/containerizer/mesos/isolators/cgroups/subsystems/net_prio.cpp
   slave/containerizer/mesos/isolators/cgroups/subsystems/perf_event.cpp
-  slave/containerizer/mesos/isolators/cgroups/subsystems/pid.cpp
+  slave/containerizer/mesos/isolators/cgroups/subsystems/pids.cpp
   slave/containerizer/mesos/isolators/docker/runtime.cpp
   slave/containerizer/mesos/isolators/docker/volume/driver.cpp
   slave/containerizer/mesos/isolators/docker/volume/isolator.cpp

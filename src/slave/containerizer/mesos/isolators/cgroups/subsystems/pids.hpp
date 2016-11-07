@@ -14,32 +14,47 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <process/id.hpp>
+#ifndef __CGROUPS_ISOLATOR_SUBSYSTEMS_PIDS_HPP__
+#define __CGROUPS_ISOLATOR_SUBSYSTEMS_PIDS_HPP__
 
-#include "slave/containerizer/mesos/isolators/cgroups/subsystems/pid.hpp"
+#include <string>
 
-using process::Owned;
+#include <process/owned.hpp>
 
-using std::string;
+#include <stout/try.hpp>
+
+#include "slave/flags.hpp"
+
+#include "slave/containerizer/mesos/isolators/cgroups/constants.hpp"
+#include "slave/containerizer/mesos/isolators/cgroups/subsystem.hpp"
 
 namespace mesos {
 namespace internal {
 namespace slave {
 
-Try<Owned<Subsystem>> PidSubsystem::create(
-    const Flags& flags,
-    const string& hierarchy)
+/**
+ * Represent cgroups pids subsystem.
+ */
+class PidsSubsystem : public Subsystem
 {
-  return Owned<Subsystem>(new PidSubsystem(flags, hierarchy));
-}
+public:
+  static Try<process::Owned<Subsystem>> create(
+      const Flags& flags,
+      const std::string& hierarchy);
 
+  virtual ~PidsSubsystem() {}
 
-PidSubsystem::PidSubsystem(
-    const Flags& _flags,
-    const string& _hierarchy)
-  : ProcessBase(process::ID::generate("cgroups-pid-subsystem")),
-    Subsystem(_flags, _hierarchy) {}
+  virtual std::string name() const
+  {
+    return CGROUP_SUBSYSTEM_PIDS_NAME;
+  };
+
+private:
+  PidsSubsystem(const Flags& flags, const std::string& hierarchy);
+};
 
 } // namespace slave {
 } // namespace internal {
 } // namespace mesos {
+
+#endif // __CGROUPS_ISOLATOR_SUBSYSTEMS_PIDS_HPP__

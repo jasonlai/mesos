@@ -49,7 +49,7 @@ const std::string CGROUP_SUBSYSTEM_MEMORY_NAME = "memory";
 const std::string CGROUP_SUBSYSTEM_NET_CLS_NAME = "net_cls";
 const std::string CGROUP_SUBSYSTEM_NET_PRIO_NAME = "net_prio";
 const std::string CGROUP_SUBSYSTEM_PERF_EVENT_NAME = "perf_event";
-const std::string CGROUP_SUBSYSTEM_PID_NAME = "pid";
+const std::string CGROUP_SUBSYSTEM_PIDS_NAME = "pids";
 
 } // namespace slave {
 } // namespace internal {

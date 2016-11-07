@@ -1048,7 +1048,7 @@ MESOS_LINUX_FILES =									\
   slave/containerizer/mesos/isolators/cgroups/subsystems/net_cls.cpp			\
   slave/containerizer/mesos/isolators/cgroups/subsystems/net_prio.cpp			\
   slave/containerizer/mesos/isolators/cgroups/subsystems/perf_event.cpp			\
-  slave/containerizer/mesos/isolators/cgroups/subsystems/pid.cpp			\
+  slave/containerizer/mesos/isolators/cgroups/subsystems/pids.cpp			\
   slave/containerizer/mesos/isolators/docker/runtime.cpp				\
   slave/containerizer/mesos/isolators/docker/volume/isolator.cpp			\
   slave/containerizer/mesos/isolators/filesystem/linux.cpp				\
@@ -1090,7 +1090,7 @@ MESOS_LINUX_FILES +=									\
   slave/containerizer/mesos/isolators/cgroups/subsystems/net_cls.hpp			\
   slave/containerizer/mesos/isolators/cgroups/subsystems/net_prio.hpp			\
   slave/containerizer/mesos/isolators/cgroups/subsystems/perf_event.hpp			\
-  slave/containerizer/mesos/isolators/cgroups/subsystems/pid.hpp			\
+  slave/containerizer/mesos/isolators/cgroups/subsystems/pids.hpp			\
   slave/containerizer/mesos/isolators/docker/runtime.hpp				\
   slave/containerizer/mesos/isolators/docker/volume/isolator.hpp			\
   slave/containerizer/mesos/isolators/filesystem/linux.hpp				\
