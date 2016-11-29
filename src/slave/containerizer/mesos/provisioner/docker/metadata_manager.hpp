@@ -19,6 +19,7 @@
 
 #include <list>
 #include <string>
+#include <utility>
 
 #include <stout/hashmap.hpp>
 #include <stout/json.hpp>
@@ -62,9 +63,10 @@ public:
   ~MetadataManager();
 
   /**
-   * Recover all stored Image and its layer references.
+   * Recover all stored Image and its layer references, and return all
+   * recovered layers upon success.
    */
-  process::Future<Nothing> recover();
+  process::Future<std::vector<Layer>> recover();
 
   /**
    * Create an Image, put it in metadata manager and persist the reference
@@ -72,13 +74,13 @@ public:
    *
    * @param reference the reference of the Docker image to place in the
    *                  reference store.
-   * @param layerIds the list of layer ids that comprise the Docker image in
-   *                 order where the root layer's id (no parent layer) is first
-   *                 and the leaf layer's id is last.
+   * @param layers the list of layers that comprise the Docker image in
+   *               order where the root layer (no parent layer) is first
+   *               and the leaf layer is last.
    */
   process::Future<Image> put(
       const ::docker::spec::ImageReference& reference,
-      const std::vector<std::string>& layerIds);
+      const std::vector<Layer>& layers);
 
   /**
    * Retrieve Image based on image reference if it is among the Images
@@ -88,9 +90,17 @@ public:
    * @param cached the flag whether pull Docker image forcelly from remote
    *               registry or local repo.
    */
-  process::Future<Option<Image>> get(
+  process::Future<Option<std::pair<Image, std::vector<Layer>>>> get(
       const ::docker::spec::ImageReference& reference,
       bool cached);
+
+  /**
+   * Store a layer. This is only used for backfilling layer size
+   * after agent recovers unknown layers.
+   *
+   * @param layer the layer to store.
+   */
+  process::Future<Nothing> putLayer(const Layer& layer);
 
 private:
   explicit MetadataManager(process::Owned<MetadataManagerProcess> process);

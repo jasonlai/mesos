@@ -16,6 +16,7 @@
 
 #include <string>
 #include <vector>
+#include <utility>
 
 #include <glog/logging.h>
 
@@ -38,6 +39,8 @@
 
 namespace spec = docker::spec;
 
+using std::list;
+using std::pair;
 using std::string;
 using std::vector;
 
@@ -57,15 +60,17 @@ public:
 
   ~MetadataManagerProcess() {}
 
-  Future<Nothing> recover();
+  Future<vector<Layer>> recover();
 
   Future<Image> put(
       const spec::ImageReference& reference,
-      const vector<string>& layerIds);
+      const vector<Layer>& layers);
 
-  Future<Option<Image>> get(
+  Future<Option<pair<Image, vector<Layer>>>> get(
       const spec::ImageReference& reference,
       bool cached);
+
+  Future<Nothing> putLayer(const Layer& layer);
 
   // TODO(chenlily): Implement removal of unreferenced images.
 
@@ -79,6 +84,10 @@ private:
   // by image name.
   // For example, "ubuntu:14.04" -> ubuntu14:04 Image.
   hashmap<string, Image> storedImages;
+
+  // This is a lookup table for layers that are stored in memory.
+  // It is keyed by layer id.
+  hashmap<string, Layer> storedLayers;
 };
 
 
@@ -104,7 +113,7 @@ MetadataManager::~MetadataManager()
 }
 
 
-Future<Nothing> MetadataManager::recover()
+Future<vector<Layer>> MetadataManager::recover()
 {
   return dispatch(process.get(), &MetadataManagerProcess::recover);
 }
@@ -112,17 +121,17 @@ Future<Nothing> MetadataManager::recover()
 
 Future<Image> MetadataManager::put(
     const spec::ImageReference& reference,
-    const vector<string>& layerIds)
+    const vector<Layer>& layers)
 {
   return dispatch(
       process.get(),
       &MetadataManagerProcess::put,
       reference,
-      layerIds);
+      layers);
 }
 
 
-Future<Option<Image>> MetadataManager::get(
+Future<Option<pair<Image, vector<Layer>>>> MetadataManager::get(
     const spec::ImageReference& reference,
     bool cached)
 {
@@ -134,16 +143,27 @@ Future<Option<Image>> MetadataManager::get(
 }
 
 
+Future<Nothing> MetadataManager::putLayer(
+    const Layer& layer)
+{
+  return dispatch(
+      process.get(),
+      &MetadataManagerProcess::putLayer,
+      layer);
+}
+
+
 Future<Image> MetadataManagerProcess::put(
     const spec::ImageReference& reference,
-    const vector<string>& layerIds)
+    const vector<Layer>& layers)
 {
   const string imageReference = stringify(reference);
 
   Image dockerImage;
   dockerImage.mutable_reference()->CopyFrom(reference);
-  foreach (const string& layerId, layerIds) {
-    dockerImage.add_layer_ids(layerId);
+  foreach (const Layer& layer, layers) {
+    dockerImage.add_layer_ids(layer.id());
+    storedLayers[layer.id()] = layer;
   }
 
   storedImages[imageReference] = dockerImage;
@@ -159,7 +179,7 @@ Future<Image> MetadataManagerProcess::put(
 }
 
 
-Future<Option<Image>> MetadataManagerProcess::get(
+Future<Option<pair<Image, vector<Layer>>>> MetadataManagerProcess::get(
     const spec::ImageReference& reference,
     bool cached)
 {
@@ -176,7 +196,37 @@ Future<Option<Image>> MetadataManagerProcess::get(
     return None();
   }
 
-  return storedImages[imageReference];
+  Image image = storedImages[imageReference];
+  vector<Layer> layers;
+  layers.reserve(image.layer_ids_size());
+
+  foreach (const string& layerId, image.layer_ids()) {
+    Option<Layer> layer = storedLayers.get(layerId);
+
+    if (layer.isNone()) {
+      LOG(WARNING) << "Stored image reference ''" << imageReference
+                   << "' has missing layer '" << layerId << "'.";
+      return None();
+    }
+
+    layers.push_back(layer.get());
+  }
+
+  return std::make_pair(image, layers);
+}
+
+
+Future<Nothing> MetadataManagerProcess::putLayer(
+    const Layer& layer)
+{
+  storedLayers[layer.id()] = layer;
+
+  Try<Nothing> status = persist();
+  if (status.isError()) {
+    return Failure("Failed to save state of Docker images: " + status.error());
+  }
+
+  return Nothing();
 }
 
 
@@ -186,6 +236,10 @@ Try<Nothing> MetadataManagerProcess::persist()
 
   foreachvalue (const Image& image, storedImages) {
     images.add_images()->CopyFrom(image);
+  }
+
+  foreachvalue (const Layer& layer, storedLayers) {
+    images.add_layers()->CopyFrom(layer);
   }
 
   Try<Nothing> status = state::checkpoint(
@@ -198,14 +252,15 @@ Try<Nothing> MetadataManagerProcess::persist()
 }
 
 
-Future<Nothing> MetadataManagerProcess::recover()
+Future<vector<Layer>> MetadataManagerProcess::recover()
 {
+  vector<Layer> layers;
   string storedImagesPath = paths::getStoredImagesPath(flags.docker_store_dir);
 
   if (!os::exists(storedImagesPath)) {
     LOG(INFO) << "No images to load from disk. Docker provisioner image "
               << "storage path '" << storedImagesPath << "' does not exist";
-    return Nothing();
+    return layers;
   }
 
   Result<Images> images = ::protobuf::read<Images>(storedImagesPath);
@@ -220,8 +275,43 @@ Future<Nothing> MetadataManagerProcess::recover()
     return Failure("Unexpected empty images file '" + storedImagesPath + "'");
   }
 
+  std::set<string> missingLayerIds;
+
+  foreach (const Layer& layer, images.get().layers()) {
+    const string& layerId = layer.id();
+
+    const string imageLayerPath = paths::getImageLayerPath(
+        flags.docker_store_dir,
+        layerId);
+
+    if (!os::exists(imageLayerPath)) {
+      missingLayerIds.insert(layerId);
+      LOG(WARNING) << "Skipped loading missing layer '" << layerId << "'";
+      continue;
+    }
+
+    storedLayers[layerId] = layer;
+  }
+
   foreach (const Image& image, images.get().images()) {
     const string imageReference = stringify(image.reference());
+
+    bool missingLayer = false;
+
+    foreach (const string& layerId, image.layer_ids()) {
+      if (!storedLayers.contains(layerId)) {
+        missingLayer = true;
+        break;
+      }
+    }
+
+    // TODO(zhitao): This will prevent any image to be recovered during upgrade
+    // if the layer has not been previously persisted. This can be improved by
+    // backfill their sizes once at recovery.
+    if (missingLayer) {
+      LOG(WARNING) << "Skipped loading image '" << imageReference << "'";
+      continue;
+    }
 
     if (storedImages.contains(imageReference)) {
       LOG(WARNING) << "Found duplicate image in recovery for image reference '"
@@ -236,7 +326,13 @@ Future<Nothing> MetadataManagerProcess::recover()
   LOG(INFO) << "Successfully loaded " << storedImages.size()
             << " Docker images";
 
-  return Nothing();
+  layers.reserve(storedLayers.size());
+
+  foreachvalue(const Layer& layer, storedLayers) {
+    layers.push_back(layer);
+  }
+
+  return layers;
 }
 
 } // namespace docker {

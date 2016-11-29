@@ -31,6 +31,19 @@ message Image {
 }
 
 
+message Layer {
+  required string id = 1;
+
+  // Disk space this layer occupies, in unit of bytes.
+  optional int64 bytes = 2;
+
+  // Epoch timestamp in milliseconds.
+  optional int64 timestmap = 3;
+}
+
+
 message Images {
   repeated Image images = 1;
+
+  repeated Layer layers = 2;
 }

@@ -15,6 +15,7 @@
 // limitations under the License.
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <glog/logging.h>
@@ -35,6 +36,8 @@
 
 #include <mesos/docker/spec.hpp>
 
+#include "slave/containerizer/mesos/isolators/posix/disk.hpp"
+
 #include "slave/containerizer/mesos/provisioner/constants.hpp"
 #include "slave/containerizer/mesos/provisioner/utils.hpp"
 
@@ -50,6 +53,7 @@ using namespace process;
 namespace spec = docker::spec;
 
 using std::list;
+using std::pair;
 using std::string;
 using std::vector;
 
@@ -69,13 +73,18 @@ public:
       flags(_flags),
       metadataManager(_metadataManager),
       puller(_puller),
+      collector(Seconds(0)),
       layers(
           "containerizer/mesos/docker_store/layers",
           defer(self(), &StoreProcess::_layers)),
       layersPulled("containerizer/mesos/docker_store/layers_pulled"),
+      layersMb(
+          "containerizer/mesos/docker_store/layers_mb",
+          defer(self(), &StoreProcess::_layersMb)),
       pullTimer("containerizer/mesos/docker_store/pull", Hours(1))
   {
     process::metrics::add(layers);
+    process::metrics::add(layersMb);
     process::metrics::add(layersPulled);
     process::metrics::add(pullTimer);
   }
@@ -83,6 +92,7 @@ public:
   ~StoreProcess()
   {
     process::metrics::remove(layers);
+    process::metrics::remove(layersMb);
     process::metrics::remove(layersPulled);
     process::metrics::remove(pullTimer);
   }
@@ -94,26 +104,38 @@ public:
       const string& backend);
 
 private:
+  Future<Nothing> _recover(const vector<Layer>& layers);
+
   Future<Image> _get(
       const spec::ImageReference& reference,
-      const Option<Image>& image,
+      const Option<pair<Image, vector<Layer>>>& imageLayers,
       const string& backend);
 
   Future<ImageInfo> __get(
       const Image& image,
       const string& backend);
 
-  Future<vector<string>> moveLayers(
+  Future<vector<Layer>> moveLayers(
       const string& staging,
       const vector<string>& layerIds,
       const string& backend);
 
-  Future<Nothing> moveLayer(
+  Future<Layer> moveLayer(
       const string& staging,
       const string& layerId,
       const string& backend);
 
+  Future<Layer> _moveLayer(
+      const string& layerId,
+      const Bytes& bytes);
+
+  Future<Nothing> backfill(
+      const string& layerId,
+      const Bytes& bytes);
+
   Future<double> _layers();
+
+  Future<double> _layersMb();
 
   const Flags flags;
 
@@ -121,8 +143,12 @@ private:
   Owned<Puller> puller;
   hashmap<string, Owned<Promise<Image>>> pulling;
 
+  DiskUsageCollector collector;
+  hashmap<string, Bytes> layerBytes;
+
   process::metrics::Gauge layers;
   process::metrics::Counter layersPulled;
+  process::metrics::Gauge layersMb;
   process::metrics::Timer<Milliseconds> pullTimer;
 };
 
@@ -214,7 +240,37 @@ Future<ImageInfo> Store::get(
 
 Future<Nothing> StoreProcess::recover()
 {
-  return metadataManager->recover();
+  return metadataManager->recover()
+    .then(defer(self(), &Self::_recover, lambda::_1));
+}
+
+
+Future<Nothing> StoreProcess::_recover(const vector<Layer>& layers)
+{
+  foreach(const Layer& layer, layers) {
+    const string layerPath = paths::getImageLayerPath(
+        flags.docker_store_dir,
+        layer.id());
+
+    if (!os::exists(layerPath)) {
+      LOG(WARNING) << "Recovered layer path " << layerPath
+                   << "does not exist";
+      continue;
+    }
+
+    if (layer.has_bytes()) {
+      layerBytes[layer.id()] = Bytes(layer.bytes());
+    } else {
+      LOG(INFO) << "Backfilling disk size for layer " << layer.id();
+
+      collector.usage(layerPath, vector<string>())
+          .then(defer(self(), &Self::backfill, layer.id(), lambda::_1));
+      // Do not to block `recover()` progress, but only backfill
+      // layer size after store is available.
+    }
+  }
+
+  return Nothing();
 }
 
 
@@ -242,7 +298,7 @@ Future<ImageInfo> StoreProcess::get(
 
 Future<Image> StoreProcess::_get(
     const spec::ImageReference& reference,
-    const Option<Image>& image,
+    const Option<pair<Image, vector<Layer>>>& imageLayers,
     const string& backend)
 {
   // NOTE: Here, we assume that image layers are not removed without
@@ -251,14 +307,16 @@ Future<Image> StoreProcess::_get(
   // the time we introduce cache eviction, we also want to avoid the
   // situation where a layer was returned to the provisioner but is
   // later evicted.
-  if (image.isSome()) {
+  if (imageLayers.isSome()) {
+    const Image& image = imageLayers.get().first;
+
     // It is possible that a layer is missed after recovery if the
     // agent flag `--image_provisioner_backend` is changed from a
     // specified backend to `None()`. We need to check that each
     // layer exists for a cached image.
     bool layerMissed = false;
 
-    foreach (const string& layerId, image.get().layer_ids()) {
+    foreach (const string& layerId, image.layer_ids()) {
       const string rootfsPath = paths::getImageLayerRootfsPath(
           flags.docker_store_dir,
           layerId,
@@ -271,7 +329,7 @@ Future<Image> StoreProcess::_get(
     }
 
     if (!layerMissed) {
-      return image.get();
+      return imageLayers.get().first;
     }
   }
 
@@ -291,9 +349,9 @@ Future<Image> StoreProcess::_get(
 
     Future<Image> future =
       pullTimer.time(puller->pull(reference, staging.get(), backend))
-      .then(defer(self(), &Self::moveLayers, staging.get(), lambda::_1))
-      .then(defer(self(), [=](const vector<string>& layerIds) {
-        return metadataManager->put(reference, layerIds);
+      .then(defer(self(), &Self::moveLayers, staging.get(), lambda::_1, backend))
+      .then(defer(self(), [=](const vector<Layer>& layers) {
+        return metadataManager->put(reference, layers);
       }))
       .onAny(defer(self(), [=](const Future<Image>&) {
         pulling.erase(name);
@@ -351,26 +409,35 @@ Future<ImageInfo> StoreProcess::__get(
 }
 
 
-Future<vector<string>> StoreProcess::moveLayers(
+Future<vector<Layer>> StoreProcess::moveLayers(
     const string& staging,
     const vector<string>& layerIds,
     const string& backend)
 {
-  list<Future<Nothing>> futures;
+  list<Future<Layer>> futures;
   foreach (const string& layerId, layerIds) {
     futures.push_back(moveLayer(staging, layerId, backend));
   }
 
   return collect(futures)
-    .then([layerIds]() -> vector<string> { return layerIds; });
+    .then([](const list<Layer>& layers) -> vector<Layer> {
+      return { std::begin(layers), std::end(layers) };
+    });
 }
 
 
-Future<Nothing> StoreProcess::moveLayer(
+Future<Layer> StoreProcess::moveLayer(
     const string& staging,
     const string& layerId,
     const string& backend)
 {
+  Layer layer;
+  layer.set_id(layerId);
+  Option<Bytes> bytes = layerBytes.get(layerId);
+  if (bytes.isSome()) {
+    layer.set_bytes(bytes.get().bytes());
+  }
+
   const string source = path::join(staging, layerId);
 
   // This is the case where the puller skips the pulling of the layer
@@ -378,7 +445,7 @@ Future<Nothing> StoreProcess::moveLayer(
   //
   // TODO(jieyu): Verify that the layer is actually in the store.
   if (!os::exists(source)) {
-    return Nothing();
+    return layer;
   }
 
   const string targetRootfs = paths::getImageLayerRootfsPath(
@@ -390,7 +457,7 @@ Future<Nothing> StoreProcess::moveLayer(
   // already exists in the store, we'll skip the moving since they are
   // expected to be the same.
   if (os::exists(targetRootfs)) {
-    return Nothing();
+    return layer;
   }
 
   const string sourceRootfs = paths::getImageLayerRootfsPath(source, backend);
@@ -439,21 +506,48 @@ Future<Nothing> StoreProcess::moveLayer(
     }
   }
 
-  return Nothing();
+  return collector.usage(target, vector<string>())
+      .then(defer(self(), &Self::_moveLayer, layerId, lambda::_1));
+}
+
+
+Future<Layer> StoreProcess::_moveLayer(
+    const string& layerId,
+    const Bytes& bytes)
+{
+  layerBytes[layerId] = bytes;
+  Layer layer;
+  layer.set_id(layerId);
+  layer.set_bytes(bytes.bytes());
+  return layer;
+}
+
+
+Future<Nothing> StoreProcess::backfill(
+    const string& layerId,
+    const Bytes& bytes)
+{
+  layerBytes[layerId] = bytes;
+  Layer layer;
+  layer.set_id(layerId);
+  layer.set_bytes(bytes.bytes());
+  return metadataManager->putLayer(layer);
 }
 
 
 Future<double> StoreProcess::_layers()
 {
-  const string layersRootDir =
-    paths::getImageLayersRoot(flags.docker_store_dir);
-  Try<list<string>> layerIds = os::ls(layersRootDir);
-  if (layerIds.isError()) {
-      return Failure(
-          "Failed to list docker store layers in '" + layersRootDir +
-          "': " + layerIds.error());
+  return layerBytes.size();
+}
+
+
+Future<double> StoreProcess::_layersMb()
+{
+  double result = 0;
+  foreachvalue(const Bytes& bytes, layerBytes) {
+    result += bytes.megabytes();
   }
-  return layerIds.get().size();
+  return result;
 }
 
 } // namespace docker {
