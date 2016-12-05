@@ -18,6 +18,7 @@
 
 #include "slave/containerizer/mesos/isolators/cgroups/subsystems/blkio.hpp"
 
+using process::Future;
 using process::Owned;
 
 using std::string;
@@ -39,6 +40,15 @@ BlkioSubsystem::BlkioSubsystem(
     const string& _hierarchy)
   : ProcessBase(process::ID::generate("cgroups-blkio-subsystem")),
     Subsystem(_flags, _hierarchy) {}
+
+
+Future<ResourceStatistics> BlkioSubsystem::usage(
+    const ContainerID& containerId,
+    const string& cgroup)
+{
+  ResourceStatistics result;
+  return result;
+}
 
 } // namespace slave {
 } // namespace internal {

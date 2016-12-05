@@ -23,10 +23,10 @@
 
 #include <stout/try.hpp>
 
-#include "slave/flags.hpp"
-
 #include "slave/containerizer/mesos/isolators/cgroups/constants.hpp"
 #include "slave/containerizer/mesos/isolators/cgroups/subsystem.hpp"
+
+#include "slave/flags.hpp"
 
 namespace mesos {
 namespace internal {
@@ -48,6 +48,10 @@ public:
   {
     return CGROUP_SUBSYSTEM_BLKIO_NAME;
   };
+
+  virtual process::Future<ResourceStatistics> usage(
+      const ContainerID& containerId,
+      const std::string& cgroup);
 
 private:
   BlkioSubsystem(const Flags& flags, const std::string& hierarchy);

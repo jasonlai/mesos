@@ -885,6 +885,18 @@ message Resource {
   optional SharedInfo shared = 10;
 }
 
+
+/**
+ * Describes a Unix device descriptor.
+ */
+message Device {
+  optional uint64 major = 1;
+  optional uint64 minor = 2;
+
+  // TODO(jasonlai): Possibly add more info, including optional name and path
+  // of the device.
+}
+
 /**
  * When the network bandwidth caps are enabled and the container
  * is over its limit, outbound packets may be either delayed or
@@ -1090,6 +1102,9 @@ message ResourceStatistics {
   // Disk Usage Information for executor working directory.
   optional uint64 disk_limit_bytes = 26;
   optional uint64 disk_used_bytes = 27;
+
+  // Block IO Usage Information:
+  repeated CgroupInfo.BlkioStatistics blkio = 43;
 
   // Perf statistics.
   optional PerfStatistics perf = 13;
@@ -2159,6 +2174,69 @@ message ContainerStatus {
  * Linux control group (cgroup) information.
  */
 message CgroupInfo {
+  // Configuration of a blkio cgroup subsystem.
+  message Blkio {
+    message DeviceWeight {
+      required Device device = 1;
+      required uint32 weight = 2;
+    }
+
+    message DeviceLimit {
+      required Device device = 1;
+      required uint64 value = 2;
+    }
+
+    optional uint32 weight = 1;
+    optional uint32 leaf_weight = 2;
+    repeated DeviceWeight weight_devices = 3;
+    repeated DeviceWeight leaf_weight_devices = 4;
+    repeated DeviceLimit read_bps_devices = 5;
+    repeated DeviceLimit read_iops_devices = 6;
+    repeated DeviceLimit write_bps_devices = 7;
+    repeated DeviceLimit write_iops_devices = 8;
+  }
+
+  message BlkioStatistics {
+    enum Operation {
+      UNKNOWN = 0;
+      TOTAL = 1;
+      READ = 2;
+      WRITE = 3;
+      SYNC = 4;
+      ASYNC = 5;
+    }
+
+    message StatEntry {
+      required Operation op = 1;
+      required uint64 value = 2;
+    }
+
+    message CFQEntries {
+      optional uint64 sectors = 1;
+      optional uint64 time = 2;
+      repeated StatEntry io_serviced = 3;
+      repeated StatEntry io_service_bytes = 4;
+      repeated StatEntry io_service_time = 5;
+      repeated StatEntry io_wait_time = 6;
+      repeated StatEntry io_merged = 7;
+      repeated StatEntry io_queued = 8;
+    }
+
+    optional Device device = 1;
+    repeated StatEntry io_serviced = 2;
+    repeated StatEntry io_service_bytes = 3;
+    optional CFQEntries cfq = 4;
+    optional CFQEntries cfq_recursive = 5;
+
+    // TODO(jasonlai): Possibly add more attributes for Blkio cgroup files
+    // available when `CONFIG_DEBUG_BLK_CGROUP=y` is set for kernel, including:
+    // - blkio.avg_queue_size
+    // - blkio.group_wait_time
+    // - blkio.empty_time
+    // - blkio.idle_time
+    // - blkio.dequeue
+  }
+
   // Configuration of a net_cls cgroup subsystem.
   message NetCls {
     // The 32-bit classid consists of two parts, a 16 bit major handle
@@ -2168,6 +2246,7 @@ message CgroupInfo {
     optional uint32 classid = 1;
   }
 
+  optional Blkio blkio = 2;
   optional NetCls net_cls = 1;
 }
 
