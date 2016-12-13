@@ -21,6 +21,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
 #include <mesos/slave/container_logger.hpp>
 
@@ -268,6 +269,11 @@ private:
       const ContainerID& containerId,
       const size_t count);
 
+  // Allocate a set of GPU resources for a specified container.
+  process::Future<Nothing> allocateNvidiaGpus(
+      const ContainerID& containerId,
+      const std::set<Gpu>& gpus);
+
   process::Future<Nothing> _allocateNvidiaGpus(
       const ContainerID& containerId,
       const std::set<Gpu>& allocated);
@@ -279,6 +285,11 @@ private:
   process::Future<Nothing> _deallocateNvidiaGpus(
       const ContainerID& containerId,
       const std::set<Gpu>& deallocated);
+
+  // Recover nvidia devices during docker recovery.
+  process::Future<Nothing> recoverNvidiaDevices(
+      const ContainerID& containerId,
+      const std::string& containerName);
 #endif // __linux__
 
   Try<ResourceStatistics> cgroupsStatistics(pid_t pid) const;
@@ -512,6 +523,9 @@ private:
     // GPU resources allocated to the container.
     std::set<Gpu> gpus;
 #endif // __linux__
+
+    // Devices attached to the container.
+    std::vector<Docker::Device> devices;
 
     // Marks if this container launches an executor in a docker
     // container.

@@ -82,6 +82,9 @@ namespace mesos {
 namespace internal {
 namespace slave {
 
+static constexpr unsigned int NVIDIA_MAJOR_DEVICE = 195;
+
+
 // Declared in header, see explanation there.
 const string DOCKER_NAME_PREFIX = "mesos-";
 
@@ -230,7 +233,8 @@ docker::Flags dockerFlags(
   const Flags& flags,
   const string& name,
   const string& directory,
-  const Option<map<string, string>>& taskEnvironment)
+  const Option<map<string, string>>& taskEnvironment,
+  const Option<vector<Docker::Device>>& devices)
 {
   docker::Flags dockerFlags;
   dockerFlags.container = name;
@@ -246,6 +250,11 @@ docker::Flags dockerFlags(
 
   // TODO(alexr): Remove this after the deprecation cycle (started in 1.0).
   dockerFlags.stop_timeout = flags.docker_stop_timeout;
+
+  // Expose devices to this docker container.
+  if (devices.isSome() && !devices->empty()) {
+    dockerFlags.devices = strings::join(",", devices.get());
+  }
 
   return dockerFlags;
 }
@@ -345,13 +354,18 @@ DockerContainerizerProcess::Container::create(
 
     newContainerInfo.mutable_docker()->CopyFrom(dockerInfo);
 
-    // NOTE: We do not set the optional `taskEnvironment` here as
-    // this field is currently used to propagate environment variables
-    // from a hook. This hook is called after `Container::create`.
+    // NOTE: We do not set the optional `taskEnvironment` and `devices`
+    // here. The `taskEnvironment` field is currently used to propagate
+    // environment variables from a hook, this hook is called after
+    // `Container::create`. The `devices` field is currently used to
+    // expose Nvidia devices to the docker container, this is set in
+    // `DockerContainerizerProcess::launchExecutorProcess` which is also
+    // after `Container::create`.
     docker::Flags dockerExecutorFlags = dockerFlags(
       flags,
       Container::name(slaveId, stringify(id)),
       containerWorkdir,
+      None(),
       None());
 
     // Override the command with the docker command executor.
@@ -666,6 +680,28 @@ Try<Nothing> DockerContainerizerProcess::unmountPersistentVolumes(
 #ifdef __linux__
 Future<Nothing> DockerContainerizerProcess::allocateNvidiaGpus(
     const ContainerID& containerId,
+    const set<Gpu>& gpus)
+{
+  if (!nvidia.isSome()) {
+    return Failure("Attempted to allocate GPUs"
+                   " without Nvidia libraries available");
+  }
+
+  if (!containers_.contains(containerId)) {
+    return Failure("Container is already destroyed");
+  }
+
+  return nvidia->allocator.allocate(gpus)
+    .then(defer(
+        self(),
+        &Self::_allocateNvidiaGpus,
+        containerId,
+        gpus));
+}
+
+
+Future<Nothing> DockerContainerizerProcess::allocateNvidiaGpus(
+    const ContainerID& containerId,
     const size_t count)
 {
   if (!nvidia.isSome()) {
@@ -694,8 +730,33 @@ Future<Nothing> DockerContainerizerProcess::_allocateNvidiaGpus(
     return nvidia->allocator.deallocate(allocated);
   }
 
+  Container* container = containers_.at(containerId);
+
+  // NOTE: GPU devices permissions are required to be `rmw` by default,
+  // that is because GPU tasks launched in the container may need to
+  // read/write/mknod to GPU devices in their lifecycle.
+  //
+  // `container->devices` records Nvidia GPU devices to be attached to
+  // the docker container.
+  container->devices.push_back(
+      Docker::Device::parse("/dev/nvidiactl:/dev/nvidiactl:rmw").get());
+
+  container->devices.push_back(
+      Docker::Device::parse("/dev/nvidia-uvm:/dev/nvidia-uvm:rmw").get());
+
+  if (os::exists("/dev/nvidia-uvm-tools")) {
+    container->devices.push_back(
+        Docker::Device::parse(
+            "/dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools:rmw").get());
+  }
+
   foreach (const Gpu& gpu, allocated) {
     containers_.at(containerId)->gpus.insert(gpu);
+
+    const string devicePath = "/dev/nvidia" + stringify(gpu.minor);
+    container->devices.push_back(
+        Docker::Device::parse(
+            devicePath + ":" + devicePath + ":" + "rmw").get());
   }
 
   return Nothing();
@@ -730,6 +791,68 @@ Future<Nothing> DockerContainerizerProcess::_deallocateNvidiaGpus(
   }
 
   return Nothing();
+}
+
+
+process::Future<Nothing> DockerContainerizerProcess::recoverNvidiaDevices(
+    const ContainerID& containerId,
+    const string& containerName)
+{
+  // Invoke docker inspect on the recovered container.
+  return docker->inspect(containerName, slave::DOCKER_INSPECT_DELAY)
+    .then(defer(self(), [this, containerId](
+        const Docker::Container& container)-> Future<Nothing> {
+      if (container.devices.empty()) {
+        return Nothing();
+      }
+
+      // If the devices vector is not empty.
+      // Look for nvidia device in the vector of devices. Get the GPU device
+      // numbers from the vector of devices used by the container.
+      const string nvidiaDevicePrefix = "/dev/nvidia";
+      set<Gpu> gpus;
+
+      foreach(const Docker::Device& device, container.devices) {
+        const string deviceString = device.hostPath.string();
+
+        if (strings::startsWith(deviceString, nvidiaDevicePrefix)) {
+          // If the device string is one of the control devices then
+          // we can skip to the next device until we find the GPU
+          // device(s) of the format /dev/nvidia<minor-number>.
+          if ((deviceString.compare("/dev/nvidiactl") == 0)
+              || (deviceString.compare("/dev/nvidia-uvm") == 0)
+              || (deviceString.compare("/dev/nvidia-uvm-tools") == 0)) {
+            continue;
+          }
+
+          // The string should be of the format /dev/nvidia<minor-number>.
+          // Pull out the Nvidia device minor number from the string.
+          const string minorNumberString = strings::remove(
+              deviceString, nvidiaDevicePrefix, strings::PREFIX);
+
+          // Numify the leftover string.
+          Try<unsigned int> minorNumber =
+            numify<unsigned int>(minorNumberString);
+          if (minorNumber.isError()) {
+            return Failure("Failed to get minor number from the device string");
+          }
+
+          // Use the minor number to account for the GPUs on recovery.
+          Gpu gpu;
+          gpu.major = NVIDIA_MAJOR_DEVICE;
+          gpu.minor = minorNumber.get();
+          gpus.insert(gpu);
+        }
+      }
+
+      if (!gpus.empty()) {
+        // Invoke allocator to account for the GPUs used by the
+        // recovered containers.
+        return allocateNvidiaGpus(containerId, gpus);
+      }
+
+      return Nothing();
+  }));
 }
 #endif // __linux__
 
@@ -1000,6 +1123,14 @@ Future<Nothing> DockerContainerizerProcess::_recover(
             containerId);
 
         container->directory = sandboxDirectory;
+
+#ifdef __linux__
+        recoverNvidiaDevices(containerId, container->name())
+          .onFailed(defer(self(), [containerId](const string& message) {
+            return Failure("Failed to recover GPU devices for container "
+                + stringify(containerId) + " : " + message);
+          }));
+#endif
       }
     }
   }
@@ -1467,7 +1598,8 @@ Future<pid_t> DockerContainerizerProcess::launchExecutorProcess(
         flags,
         container->name(),
         container->directory,
-        container->taskEnvironment);
+        container->taskEnvironment,
+        container->devices);
 
     VLOG(1) << "Launching 'mesos-docker-executor' with flags '"
             << launchFlags << "'";
@@ -2195,12 +2327,6 @@ void DockerContainerizerProcess::__destroy(
   Container* container = containers_.at(containerId);
 
   if (!kill.isReady() && !container->status.future().isReady()) {
-    // TODO(benh): This means we've failed to do a Docker::kill, which
-    // means it's possible that the container is still going to be
-    // running after we return! We either need to have a periodic
-    // "garbage collector", or we need to retry the Docker::kill
-    // indefinitely until it has been sucessful.
-
     string failure = "Failed to kill the Docker container: " +
                      (kill.isFailed() ? kill.failure() : "discarded future");
 
@@ -2216,6 +2342,10 @@ void DockerContainerizerProcess::__destroy(
 
     containers_.erase(containerId);
 
+    // We've failed to do a Docker::kill, which means that the
+    // container is still running! Here we invoke `Self::remove`
+    // after `docker_remove_delay` to force remove the docker
+    // container again.
     delay(
       flags.docker_remove_delay,
       self(),

@@ -86,7 +86,8 @@ public:
       const string& mappedDirectory,
       const Duration& shutdownGracePeriod,
       const string& launcherDir,
-      const map<string, string>& taskEnvironment)
+      const map<string, string>& taskEnvironment,
+      const vector<Docker::Device>& devices)
     : ProcessBase(ID::generate("docker-executor")),
       killed(false),
       killedByHealthCheck(false),
@@ -98,6 +99,7 @@ public:
       mappedDirectory(mappedDirectory),
       shutdownGracePeriod(shutdownGracePeriod),
       taskEnvironment(taskEnvironment),
+      devices(devices),
       stop(Nothing()),
       inspect(Nothing()) {}
 
@@ -168,7 +170,7 @@ public:
         mappedDirectory,
         task.resources() + task.executor().resources(),
         taskEnvironment,
-        None(), // No extra devices.
+        devices,
         Subprocess::FD(STDOUT_FILENO),
         Subprocess::FD(STDERR_FILENO));
 
@@ -556,6 +558,7 @@ private:
   string mappedDirectory;
   Duration shutdownGracePeriod;
   map<string, string> taskEnvironment;
+  vector<Docker::Device> devices;
 
   Option<KillPolicy> killPolicy;
   Option<Future<Option<int>>> run;
@@ -580,7 +583,8 @@ public:
       const string& mappedDirectory,
       const Duration& shutdownGracePeriod,
       const string& launcherDir,
-      const map<string, string>& taskEnvironment)
+      const map<string, string>& taskEnvironment,
+      const vector<Docker::Device>& devices)
   {
     process = Owned<DockerExecutorProcess>(new DockerExecutorProcess(
         docker,
@@ -589,7 +593,8 @@ public:
         mappedDirectory,
         shutdownGracePeriod,
         launcherDir,
-        taskEnvironment));
+        taskEnvironment,
+        devices));
 
     spawn(process.get());
   }
@@ -780,6 +785,21 @@ int main(int argc, char** argv)
     return EXIT_FAILURE;
   }
 
+  vector<Docker::Device> devices;
+  if (flags.devices.isSome()) {
+    const vector<string> deviceList = strings::split(flags.devices.get(), ",");
+    foreach (const string& device, deviceList) {
+      Try<Docker::Device> parsed = Docker::Device::parse(device);
+      if(parsed.isError()) {
+        cerr << flags.usage("Failed to parse --devices: " + parsed.error())
+             << endl;
+        return EXIT_FAILURE;
+      }
+
+      devices.push_back(parsed.get());
+    }
+  }
+
   // The 2nd argument for docker create is set to false so we skip
   // validation when creating a docker abstraction, as the slave
   // should have already validated docker.
@@ -800,7 +820,8 @@ int main(int argc, char** argv)
       flags.mapped_directory.get(),
       shutdownGracePeriod,
       flags.launcher_dir.get(),
-      taskEnvironment);
+      taskEnvironment,
+      devices);
 
   mesos::MesosExecutorDriver driver(&executor);
   return driver.run() == mesos::DRIVER_STOPPED ? EXIT_SUCCESS : EXIT_FAILURE;
