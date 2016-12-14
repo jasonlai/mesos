@@ -516,6 +516,30 @@ void HierarchicalAllocatorProcess::addSlave(
   slave.info = slaveInfo;
   slave.capabilities = protobuf::slave::Capabilities(capabilities);
 
+  // This is uber specific code.
+  Attributes attributes = slaveInfo.attributes();
+  foreach (const Attribute& attribute, attributes) {
+    if (attribute.name() == "role_name_regex") {
+      const string text = attribute.text().value();
+      if (text.empty()) {
+        LOG(WARNING) << "Skipping empty attribute text on slave '" << slaveId
+                     << "' hostname '" << slaveInfo.hostname() << "'";
+      } else {
+        try {
+          VLOG(1) << "Slave '" << slaveId << "' has role name regex '"
+                  << text << "'";
+          roleMatcher[slaveId] = std::regex(text);
+        } catch (std::regex_error& e) {
+          LOG(WARNING) << "Skipping incorrect regex attribute text on slave '"
+                       << slaveId << "' hostname '"
+                       << slaveInfo.hostname() << "'";
+        }
+      }
+      break;
+    }
+  }
+  // End of uber specific code.
+
   // NOTE: We currently implement maintenance in the allocator to be able to
   // leverage state and features such as the FrameworkSorter and OfferFilter.
   if (unavailability.isSome()) {
@@ -1763,6 +1787,18 @@ void HierarchicalAllocatorProcess::__allocate()
       Resources unsatisfiedQuota = Resources(quota.info.guarantee()) -
         resourcesChargedAgainstQuota;
 
+      Try<bool> roleFiltered = isRoleFiltered(role, slaveId);
+      if (roleFiltered.isError()) {
+        LOG(ERROR) << "Error when filtering role on slave '" << slaveId
+                   << "': " << roleFiltered.error();
+        continue;
+      }
+      if (roleFiltered.get()) {
+        VLOG(2) << "Skipping role '" << role << "' on slave '"
+                << slaveId << "'";
+        continue;
+      }
+
       // Fetch frameworks according to their fair share.
       // NOTE: Suppressed frameworks are not included in the sort.
       CHECK(frameworkSorters.contains(role));
@@ -2025,6 +2061,21 @@ void HierarchicalAllocatorProcess::__allocate()
       if (quotas.contains(role)) {
         continue;
       }
+
+      // This is uber specific code.
+      Try<bool> roleFiltered = isRoleFiltered(role, slaveId);
+      if (roleFiltered.isError()) {
+        LOG(ERROR) << "Error when filtering role on slave '" << slaveId
+                   << "': " << roleFiltered.error();
+        continue;
+      }
+
+      if (roleFiltered.get()) {
+        VLOG(2) << "Skipping role '" << role << "' on slave '"
+                << slaveId << "'";
+        continue;
+      }
+      // End of Uber specific code.
 
       // NOTE: Suppressed frameworks are not included in the sort.
       CHECK(frameworkSorters.contains(role));
@@ -2461,6 +2512,26 @@ bool HierarchicalAllocatorProcess::isFiltered(
   }
 
   return false;
+}
+
+
+Try<bool> HierarchicalAllocatorProcess::isRoleFiltered(
+    const string& role,
+    const SlaveID& slaveId) const
+{
+  Option<std::regex> roleRegex = roleMatcher.get(slaveId);
+
+  if (roleRegex.isNone()) {
+    return false;
+  }
+
+  try {
+    return !std::regex_match(role, roleRegex.get());
+  } catch (std::regex_error& e) {
+    LOG(WARNING) << "Skipping regex on slave '" << slaveId
+                  << "' on role '" << role << "', error: " << e.what();
+    return Error(e.what());
+  }
 }
 
 
