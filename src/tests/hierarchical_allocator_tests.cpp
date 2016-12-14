@@ -3829,6 +3829,157 @@ TEST_P(HierarchicalAllocatorTestWithParam, AllocateSharedResources)
 }
 
 
+// This test checks that the uber specific regex filter for role name works
+// matches frameworks in matched roles, in non quota case.
+TEST_F(HierarchicalAllocatorTest, RoleRegexNonQuotaMatch)
+{
+  Clock::pause();
+
+  initialize();
+
+  // Create an agent with a name regex.
+  SlaveInfo agent = createSlaveInfo("cpus:2;mem:1024");
+  Attribute* attribute = agent.add_attributes();
+  attribute->set_name("role_name_regex");
+  attribute->mutable_text()->set_value("matched-.*");
+  allocator->addSlave(agent.id(), agent, None(), agent.resources(), {});
+
+  const string role = "matched-role";
+
+  // framework will match given agent.
+  FrameworkInfo framework = createFrameworkInfo(role);
+  allocator->addFramework(framework.id(), framework, {}, true);
+
+  // Advance the clock to trigger a batch allocation.
+  Clock::advance(flags.allocation_interval);
+  Clock::settle();
+
+  Future<Allocation> allocation = allocations.get();
+  AWAIT_READY(allocation);
+  EXPECT_EQ(framework.id(), allocation.get().frameworkId);
+  EXPECT_EQ(allocatedResources(agent.resources(), role),
+            Resources::sum(allocation.get().resources.at(role)));
+
+  Clock::resume();
+}
+
+
+// This test checks that the uber specific regex filter for role name works
+// ensures framework in unmatched role will not get allocated, in non quota
+// case.
+TEST_F(HierarchicalAllocatorTest, RoleRegexNonQuotaUnmatch)
+{
+  Clock::pause();
+
+  initialize();
+
+  // Create an agent with a name regex.
+  SlaveInfo agent = createSlaveInfo("cpus:2;mem:1024");
+  Attribute* attribute = agent.add_attributes();
+  attribute->set_name("role_name_regex");
+  attribute->mutable_text()->set_value("matched-.*");
+  allocator->addSlave(agent.id(), agent, None(), agent.resources(), {});
+
+  // framework will not match.
+  FrameworkInfo framework = createFrameworkInfo("not-matched-role");
+  allocator->addFramework(framework.id(), framework, {}, true);
+
+  // Advance the clock to trigger a batch allocation.
+  Clock::advance(flags.allocation_interval);
+  Clock::settle();
+
+  Future<Allocation> allocation = allocations.get();
+  CHECK_PENDING(allocation);
+
+  // Advance the clock to trigger a batch allocation.
+  Clock::advance(flags.allocation_interval);
+  Clock::settle();
+
+  CHECK_PENDING(allocation);
+
+  Clock::resume();
+}
+
+
+// This test checks that the uber specific regex filter for role name works
+// correctly for matched role, in quota'ed case.
+TEST_F(HierarchicalAllocatorTest, RoleRegexQuotaMatched)
+{
+  Clock::pause();
+
+  initialize();
+
+  // Create an agent with a name regex.
+  SlaveInfo agent = createSlaveInfo("cpus:2;mem:1024");
+  Attribute* attribute = agent.add_attributes();
+  attribute->set_name("role_name_regex");
+  attribute->mutable_text()->set_value("matched-.*");
+  allocator->addSlave(agent.id(), agent, None(), agent.resources(), {});
+
+  const string role = "matched-role";
+
+  const Quota quota = createQuota(role, "cpus:2;mem:1024");
+  allocator->setQuota(role, quota);
+
+  // framework will match given agent.
+  FrameworkInfo framework = createFrameworkInfo(role);
+  allocator->addFramework(framework.id(), framework, {}, true);
+
+  // Advance the clock to trigger a batch allocation.
+  Clock::advance(flags.allocation_interval);
+  Clock::settle();
+
+  Future<Allocation> allocation = allocations.get();
+  AWAIT_READY(allocation);
+  EXPECT_EQ(framework.id(), allocation.get().frameworkId);
+  EXPECT_EQ(allocatedResources(agent.resources(), role),
+            Resources::sum(allocation.get().resources.at(role)));
+
+  Clock::resume();
+}
+
+
+// This test checks that the uber specific regex filter for role name works
+// correctly for unmatched role in quota'ed case.
+TEST_F(HierarchicalAllocatorTest, RoleRegexQuotaUnmatch)
+{
+    Clock::pause();
+
+  initialize();
+
+  // Create an agent with a name regex.
+  SlaveInfo agent = createSlaveInfo("cpus:2;mem:1024");
+  Attribute* attribute = agent.add_attributes();
+  attribute->set_name("role_name_regex");
+  attribute->mutable_text()->set_value("matched-.*");
+  allocator->addSlave(agent.id(), agent, None(), agent.resources(), {});
+
+  const string role = "not-matched-role";
+
+  const Quota quota = createQuota(role, "cpus:2;mem:1024");
+  allocator->setQuota(role, quota);
+
+  // framework will not match.
+  FrameworkInfo framework = createFrameworkInfo(role);
+  allocator->addFramework(framework.id(), framework, {}, true);
+
+  // Advance the clock to trigger a batch allocation.
+  Clock::advance(flags.allocation_interval);
+  Clock::settle();
+
+  Future<Allocation> allocation = allocations.get();
+  CHECK_PENDING(allocation);
+
+  // Advance the clock to trigger a batch allocation.
+  Clock::advance(flags.allocation_interval);
+  Clock::settle();
+
+  CHECK_PENDING(allocation);
+
+  Clock::resume();
+}
+
+
 class HierarchicalAllocator_BENCHMARK_Test
   : public HierarchicalAllocatorTestBase,
     public WithParamInterface<std::tr1::tuple<size_t, size_t>> {};
