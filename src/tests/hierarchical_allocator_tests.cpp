@@ -3616,6 +3616,256 @@ TEST_F(HierarchicalAllocatorTest, ReviveOffers)
 }
 
 
+// This test checks that the uber specific regex filter for role name works
+// matches frameworks in matched roles, in non quota case.
+TEST_F(HierarchicalAllocatorTest, RoleRegexNonQuotaMatch)
+{
+  Clock::pause();
+
+  initialize();
+
+  // Create an agent with a name regex.
+  SlaveInfo agent = createSlaveInfo("cpus:2;mem:1024");
+  Attribute* attribute = agent.add_attributes();
+  attribute->set_name("role_name_regex");
+  attribute->mutable_text()->set_value("matched-.*");
+  allocator->addSlave(agent.id(), agent, None(), agent.resources(), {});
+
+  // framework will match given agent.
+  FrameworkInfo framework = createFrameworkInfo("matched-role");
+  allocator->addFramework(framework.id(), framework, {}, true);
+
+  // Advance the clock to trigger a batch allocation.
+  Clock::advance(flags.allocation_interval);
+  Clock::settle();
+
+  Future<Allocation> allocation = allocations.get();
+  AWAIT_READY(allocation);
+  EXPECT_EQ(framework.id(), allocation.get().frameworkId);
+  EXPECT_EQ(agent.resources(),
+            Resources::sum(allocation.get().resources));
+
+  Clock::resume();
+}
+
+
+// This test checks that the uber specific regex filter for role name works
+// ensures framework in unmatched role will not get allocated, in non quota
+// case.
+TEST_F(HierarchicalAllocatorTest, RoleRegexNonQuotaUnmatch)
+{
+  Clock::pause();
+
+  initialize();
+
+  // Create an agent with a name regex.
+  SlaveInfo agent = createSlaveInfo("cpus:2;mem:1024");
+  Attribute* attribute = agent.add_attributes();
+  attribute->set_name("role_name_regex");
+  attribute->mutable_text()->set_value("matched-.*");
+  allocator->addSlave(agent.id(), agent, None(), agent.resources(), {});
+
+  // framework will not match.
+  FrameworkInfo framework = createFrameworkInfo("not-matched-role");
+  allocator->addFramework(framework.id(), framework, {}, true);
+
+  // Advance the clock to trigger a batch allocation.
+  Clock::advance(flags.allocation_interval);
+  Clock::settle();
+
+  Future<Allocation> allocation = allocations.get();
+  CHECK_PENDING(allocation);
+
+  // Advance the clock to trigger a batch allocation.
+  Clock::advance(flags.allocation_interval);
+  Clock::settle();
+
+  CHECK_PENDING(allocation);
+
+  Clock::resume();
+}
+
+
+// This test checks that the uber specific regex filter for role name works
+// correctly for matched role, in quota'ed case.
+TEST_F(HierarchicalAllocatorTest, RoleRegexQuotaMatched)
+{
+  Clock::pause();
+
+  initialize();
+
+  // Create an agent with a name regex.
+  SlaveInfo agent = createSlaveInfo("cpus:2;mem:1024");
+  Attribute* attribute = agent.add_attributes();
+  attribute->set_name("role_name_regex");
+  attribute->mutable_text()->set_value("matched-.*");
+  allocator->addSlave(agent.id(), agent, None(), agent.resources(), {});
+
+  const string role = "matched-role";
+
+  const Quota quota = createQuota(role, "cpus:2;mem:1024");
+  allocator->setQuota(role, quota);
+
+  // framework will match given agent.
+  FrameworkInfo framework = createFrameworkInfo(role);
+  allocator->addFramework(framework.id(), framework, {}, true);
+
+  // Advance the clock to trigger a batch allocation.
+  Clock::advance(flags.allocation_interval);
+  Clock::settle();
+
+  Future<Allocation> allocation = allocations.get();
+  AWAIT_READY(allocation);
+  EXPECT_EQ(framework.id(), allocation.get().frameworkId);
+  EXPECT_EQ(agent.resources(),
+            Resources::sum(allocation.get().resources));
+
+  Clock::resume();
+}
+
+
+// This test checks that the uber specific regex filter for role name works
+// correctly for unmatched role in quota'ed case.
+TEST_F(HierarchicalAllocatorTest, RoleRegexQuotaUnmatch)
+{
+    Clock::pause();
+
+  initialize();
+
+  // Create an agent with a name regex.
+  SlaveInfo agent = createSlaveInfo("cpus:2;mem:1024");
+  Attribute* attribute = agent.add_attributes();
+  attribute->set_name("role_name_regex");
+  attribute->mutable_text()->set_value("matched-.*");
+  allocator->addSlave(agent.id(), agent, None(), agent.resources(), {});
+
+  const string role = "not-matched-role";
+
+  const Quota quota = createQuota(role, "cpus:2;mem:1024");
+  allocator->setQuota(role, quota);
+
+  // framework will not match.
+  FrameworkInfo framework = createFrameworkInfo(role);
+  allocator->addFramework(framework.id(), framework, {}, true);
+
+  // Advance the clock to trigger a batch allocation.
+  Clock::advance(flags.allocation_interval);
+  Clock::settle();
+
+  Future<Allocation> allocation = allocations.get();
+  CHECK_PENDING(allocation);
+
+  // Advance the clock to trigger a batch allocation.
+  Clock::advance(flags.allocation_interval);
+  Clock::settle();
+
+  CHECK_PENDING(allocation);
+
+  Clock::resume();
+}
+
+
+class HierarchicalAllocatorTestWithParam
+  : public HierarchicalAllocatorTestBase,
+    public WithParamInterface<bool> {};
+
+
+// The HierarchicalAllocatorTestWithParam tests are parameterized by a
+// flag which indicates if quota is involved (true) or not (false).
+// TODO(anindya_sinha): Move over more allocator tests that make sense to run
+// both when the role is quota'ed and not.
+INSTANTIATE_TEST_CASE_P(
+    QuotaSwitch,
+    HierarchicalAllocatorTestWithParam,
+    ::testing::Bool());
+
+
+// Tests that shared resources are only offered to frameworks one by one.
+// Note that shared resources are offered even if they are in use.
+TEST_P(HierarchicalAllocatorTestWithParam, AllocateSharedResources)
+{
+  Clock::pause();
+
+  initialize();
+
+  // Create 2 frameworks which have opted in for SHARED_RESOURCES.
+  FrameworkInfo framework1 = createFrameworkInfo(
+      "role1",
+      {FrameworkInfo::Capability::SHARED_RESOURCES});
+
+  FrameworkInfo framework2 = createFrameworkInfo(
+      "role1",
+      {FrameworkInfo::Capability::SHARED_RESOURCES});
+
+  allocator->addFramework(framework1.id(), framework1, {}, true);
+  allocator->addFramework(framework2.id(), framework2, {}, true);
+
+  if (GetParam()) {
+    // Assign a quota.
+    const Quota quota = createQuota("role1", "cpus:8;mem:2048;disk:4096");
+    allocator->setQuota("role1", quota);
+  }
+
+  SlaveInfo slave = createSlaveInfo("cpus:4;mem:1024;disk(role1):2048");
+  allocator->addSlave(slave.id(), slave, None(), slave.resources(), {});
+
+  // Initially, all the resources are allocated to `framework1`.
+  Future<Allocation> allocation = allocations.get();
+  AWAIT_READY(allocation);
+  EXPECT_EQ(framework1.id(), allocation.get().frameworkId);
+  EXPECT_EQ(1u, allocation.get().resources.size());
+  EXPECT_TRUE(allocation.get().resources.contains(slave.id()));
+  EXPECT_EQ(slave.resources(), Resources::sum(allocation.get().resources));
+
+  // Create a shared volume.
+  Resource volume = createDiskResource(
+      "5", "role1", "id1", None(), None(), true);
+  Offer::Operation create = CREATE(volume);
+
+  // Launch a task using the shared volume.
+  TaskInfo task = createTask(
+      slave.id(),
+      Resources::parse("cpus:1;mem:5").get() + volume,
+      "echo abc > path1/file");
+  Offer::Operation launch = LAUNCH({task});
+
+  // Ensure the CREATE operation can be applied.
+  Try<Resources> updated =
+    Resources::sum(allocation.get().resources).apply(create);
+
+  ASSERT_SOME(updated);
+
+  // Update the allocation in the allocator with a CREATE and a LAUNCH
+  // (with one task using the created shared volume) operation.
+  allocator->updateAllocation(
+      framework1.id(),
+      slave.id(),
+      Resources::sum(allocation.get().resources),
+      {create, launch});
+
+  // Now recover the resources, and expect the next allocation to contain
+  // the updated resources. Note that the volume is not recovered as it is
+  // used by the task (but it is still offerable because it is shared).
+  allocator->recoverResources(
+      framework1.id(),
+      slave.id(),
+      updated.get() - task.resources(),
+      None());
+
+  // The offer to 'framework2` should contain the shared volume.
+  Clock::advance(flags.allocation_interval);
+
+  allocation = allocations.get();
+  AWAIT_READY(allocation);
+  EXPECT_EQ(framework2.id(), allocation.get().frameworkId);
+  EXPECT_EQ(1u, allocation.get().resources.size());
+  EXPECT_TRUE(allocation.get().resources.contains(slave.id()));
+  EXPECT_EQ(
+      allocation.get().resources.get(slave.id()).get().shared(),
+      Resources(volume));
+}
+
+
 class HierarchicalAllocator_BENCHMARK_Test
   : public HierarchicalAllocatorTestBase,
     public WithParamInterface<std::tr1::tuple<size_t, size_t>> {};
