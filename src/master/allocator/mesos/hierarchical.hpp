@@ -17,6 +17,9 @@
 #ifndef __MASTER_ALLOCATOR_MESOS_HIERARCHICAL_HPP__
 #define __MASTER_ALLOCATOR_MESOS_HIERARCHICAL_HPP__
 
+// NOTE: This is uber-specific code.
+// NOTE: Usage of regex requires >= 4.9 gcc.
+#include <regex>
 #include <set>
 #include <string>
 
@@ -256,6 +259,11 @@ protected:
 
   bool allocatable(const Resources& resources);
 
+  // Returns true if the given role is filtered out of the particular agent.
+  // Uber specific for now.
+  Try<bool> isRoleFiltered(
+    const std::string& role, const SlaveID& slaveId) const;
+
   bool initialized;
   bool paused;
 
@@ -385,6 +393,11 @@ protected:
   };
 
   hashmap<SlaveID, Slave> slaves;
+
+  // NOTE: This is uber-specific code.
+  // A regex based filter for role name. If this is set for a SlaveID, only
+  // roles whose name full matches will be considered in allocation.
+  hashmap<SlaveID, std::regex> roleMatcher;
 
   // Number of registered frameworks for each role. When a role's active
   // count drops to zero, it is removed from this map; the role is also
