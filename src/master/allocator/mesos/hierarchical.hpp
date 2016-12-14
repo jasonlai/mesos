@@ -17,6 +17,9 @@
 #ifndef __MASTER_ALLOCATOR_MESOS_HIERARCHICAL_HPP__
 #define __MASTER_ALLOCATOR_MESOS_HIERARCHICAL_HPP__
 
+// NOTE: This is uber-specific code.
+// NOTE: Usage of regex requires >= 4.9 gcc.
+#include <regex>
 #include <set>
 #include <string>
 
@@ -282,6 +285,11 @@ protected:
 
   static bool allocatable(const Resources& resources);
 
+  // Returns true if the given role is filtered out of the particular agent.
+  // Uber specific for now.
+  Try<bool> isRoleFiltered(
+    const std::string& role, const SlaveID& slaveId) const;
+
   bool initialized;
   bool paused;
 
@@ -444,8 +452,18 @@ protected:
   // (e.g. some tasks and/or executors are consuming resources under the role).
   hashmap<std::string, hashset<FrameworkID>> roles;
 
-  // Configured quota for each role, if any. If a role does not have
-  // an entry here it has the default quota of (no guarantee, no limit).
+  // NOTE: This is uber-specific code.
+  // A regex based filter for role name. If this is set for a SlaveID, only
+  // roles whose name full matches will be considered in allocation.
+  hashmap<SlaveID, std::regex> roleMatcher;
+
+  // Configured quota for each role, if any. Setting quota for a role
+  // changes the order that the role's frameworks are offered
+  // resources. Quota comes before fair share, hence setting quota moves
+  // the role's frameworks towards the front of the allocation queue.
+  //
+  // NOTE: We currently associate quota with roles, but this may
+  // change in the future.
   hashmap<std::string, Quota> quotas;
 
   // Aggregated resource reservations on all agents tied to a
