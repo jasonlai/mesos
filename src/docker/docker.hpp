@@ -19,7 +19,9 @@
 
 #include <list>
 #include <map>
+#include <ostream>
 #include <string>
+#include <vector>
 
 #include <process/future.hpp>
 #include <process/owned.hpp>
@@ -66,6 +68,35 @@ public:
       bool write;
       bool mknod;
     } access;
+
+    // Parse a string to docker device, the string should be
+    // in the format of `PathInHost:PathInContainer:Permission`.
+    static Try<Device> parse(const std::string& devices)
+    {
+      const std::vector<std::string> deviceInfo = strings::split(devices, ":");
+      if (deviceInfo.size() != 3) {
+        return Error("Parse device information error for '" + devices +
+                     "', 'PathInHost:PathInContainer:Permission' expected");
+      }
+
+      Device device;
+
+      device.hostPath = Path(deviceInfo[0]);
+      device.containerPath = Path(deviceInfo[1]);
+
+      device.access.read = strings::contains(deviceInfo[2], "r");
+      device.access.write = strings::contains(deviceInfo[2], "w");
+      device.access.mknod = strings::contains(deviceInfo[2], "m");
+
+      if (!device.access.read &&
+          !device.access.write &&
+          !device.access.mknod) {
+        return Error("Device should have at least one"
+                     " permission of 'r', 'w' or 'm'");
+      }
+
+      return device;
+    }
   };
 
   class Container
@@ -309,4 +340,6 @@ private:
   const Option<JSON::Object> config;
 };
 
+
+std::ostream& operator<<(std::ostream& stream, const Docker::Device& device);
 #endif // __DOCKER_HPP__
