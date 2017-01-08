@@ -19,12 +19,15 @@
 #include <stout/path.hpp>
 #include <stout/protobuf.hpp>
 
+#include "common/protobuf_utils.hpp"
+
 #include "slave/containerizer/mesos/paths.hpp"
 
 #ifndef __WINDOWS__
 namespace unix = process::network::unix;
 #endif // __WINDOWS__
 
+using mesos::slave::ContainerConfig;
 using mesos::slave::ContainerLaunchInfo;
 using mesos::slave::ContainerTermination;
 
@@ -276,11 +279,39 @@ Result<ContainerTermination> getContainerTermination(
     ::protobuf::read<ContainerTermination>(path);
 
   if (termination.isError()) {
-    return Error("Failed to read termination state of container:"
-                 " " + termination.error());
+    return Error("Failed to read termination state of container " +
+                 stringify(containerId) + ": " + termination.error());
   }
 
   return termination;
+}
+
+
+Result<ContainerConfig> getContainerConfig(
+    const string& runtimeDir,
+    const ContainerID& containerId)
+{
+  const string path = path::join(
+      getRuntimePath(runtimeDir, containerId),
+      CONTAINER_CONFIG_FILE);
+
+  if (!os::exists(path)) {
+    // This is possible if we recovered a container launched before we
+    // started to checkpoint `ContainerConfig`.
+    VLOG(1) << "Config path '" << path << "' is missing for container' "
+            << containerId << "'";
+    return None();
+  }
+
+  const Result<ContainerConfig>& containerConfig =
+    ::protobuf::read<ContainerConfig>(path);
+
+  if (containerConfig.isError()) {
+    return Error("Failed to read launch config of container: " +
+                 containerConfig.error());
+  }
+
+  return containerConfig;
 }
 
 
