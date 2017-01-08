@@ -38,6 +38,7 @@ namespace containerizer {
 namespace paths {
 
 constexpr char PID_FILE[] = "pid";
+constexpr char CONTAINER_CONFIG_FILE[] = "config";
 constexpr char STATUS_FILE[] = "status";
 constexpr char TERMINATION_FILE[] = "termination";
 constexpr char SOCKET_FILE[] = "socket";
@@ -145,6 +146,12 @@ bool getContainerForceDestroyOnRecovery(
 
 // The helper method to read the container termination state.
 Result<mesos::slave::ContainerTermination> getContainerTermination(
+    const std::string& runtimeDir,
+    const ContainerID& containerId);
+
+
+// The helper method to read the launch config of the contaienr.
+Result<mesos::slave::ContainerConfig> getContainerConfig(
     const std::string& runtimeDir,
     const ContainerID& containerId);
 

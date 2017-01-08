@@ -697,6 +697,22 @@ Future<Nothing> MesosContainerizerProcess::recover(
     container->state = RUNNING;
     container->pid = state.pid();
     container->directory = state.directory();
+
+    // Attempt to read the launch config of the container.
+    Result<ContainerConfig> config =
+      containerizer::paths::getContainerConfig(flags.runtime_dir, containerId);
+
+    if (config.isError()) {
+      return Failure("Failed to get container config: " + config.error());
+    }
+
+    if (config.isSome()) {
+      container->config = config.get();
+    } else {
+      LOG(WARNING) << "No config is recovered for container " << containerId;
+      // TODO(zhitao): Add back fill of `ContainerConfig` from other info.
+    }
+
     containers_[containerId] = container;
   }
 
@@ -743,6 +759,19 @@ Future<Nothing> MesosContainerizerProcess::recover(
       return Failure("Failed to get container pid: " + pid.error());
     }
 
+    // Attempt to read the launch config of the container.
+    Result<ContainerConfig> config =
+      containerizer::paths::getContainerConfig(flags.runtime_dir, containerId);
+
+    if (config.isError()) {
+      return Failure("Failed to get container config: " + config.error());
+    }
+
+    if (config.isNone()) {
+      VLOG(1) << "No config is recovered for container " << containerId;
+      // TODO(zhitao): Add back fill of `ContainerConfig` from `SlaveState`.
+    }
+
     // Determine the sandbox if this is a nested container.
     Option<string> directory;
     if (containerId.has_parent()) {
@@ -771,6 +800,15 @@ Future<Nothing> MesosContainerizerProcess::recover(
       container->status = reap(containerId, pid.get());
     } else {
       container->status = Future<Option<int>>(None());
+    }
+
+    if (config.isSome()) {
+      container->config = ContainerConfig();
+      container->config->CopyFrom(config.get());
+    } else {
+      LOG(INFO) << "No checkpointed config recovered for container '"
+                << containerId << "', this means image pruning will "
+                << "be disabled.";
     }
 
     containers_[containerId] = container;
@@ -1059,6 +1097,22 @@ Future<bool> MesosContainerizerProcess::launch(
         " '" + runtimePath + "': " + mkdir.error());
   }
 
+  // We checkpoint the `ContainerConfig` which includes all information
+  // for how this container is launched. Some information is very useful
+  // (especially the `ContainerInfo`) can be used for purposes like
+  // tracking image usage of all containers.
+  const string configPath = path::join(
+      containerizer::paths::getRuntimePath(flags.runtime_dir, containerId),
+      containerizer::paths::CONTAINER_CONFIG_FILE);
+
+  Try<Nothing> configCheckpointed =
+    slave::state::checkpoint(configPath, containerConfig);
+
+  if (configCheckpointed.isError()) {
+    return Failure("Failed to checkpoint the container config to '" +
+                   configPath + "': " + configCheckpointed.error());
+  }
+
   // If we are launching a `DEBUG` container,
   // checkpoint a file to mark it as destroy-on-recovery.
   if (containerConfig.has_container_class() &&
@@ -1149,7 +1203,7 @@ Future<Nothing> MesosContainerizerProcess::prepare(
   container->state = PREPARING;
 
   if (provisionInfo.isSome()) {
-    container->config.set_rootfs(provisionInfo->rootfs);
+    container->config->set_rootfs(provisionInfo->rootfs);
 
     if (provisionInfo->dockerManifest.isSome() &&
         provisionInfo->appcManifest.isSome()) {
@@ -1157,18 +1211,18 @@ Future<Nothing> MesosContainerizerProcess::prepare(
     }
 
     if (provisionInfo->dockerManifest.isSome()) {
-      ContainerConfig::Docker* docker = container->config.mutable_docker();
+      ContainerConfig::Docker* docker = container->config->mutable_docker();
       docker->mutable_manifest()->CopyFrom(provisionInfo->dockerManifest.get());
     }
 
     if (provisionInfo->appcManifest.isSome()) {
-      ContainerConfig::Appc* appc = container->config.mutable_appc();
+      ContainerConfig::Appc* appc = container->config->mutable_appc();
       appc->mutable_manifest()->CopyFrom(provisionInfo->appcManifest.get());
     }
   }
 
   // Captured for lambdas below.
-  ContainerConfig containerConfig = container->config;
+  ContainerConfig containerConfig = container->config.get();
 
   // We prepare the isolators sequentially according to their ordering
   // to permit basic dependency specification, e.g., preparing a
@@ -1217,16 +1271,18 @@ Future<Nothing> MesosContainerizerProcess::fetch(
 
   container->state = FETCHING;
 
-  const string directory = container->config.directory();
+  CHECK_SOME(container->config);
+
+  const string directory = container->config->directory();
 
   Option<string> user;
-  if (container->config.has_user()) {
-    user = container->config.user();
+  if (container->config->has_user()) {
+    user = container->config->user();
   }
 
   return fetcher->fetch(
       containerId,
-      container->config.command_info(),
+      container->config->command_info(),
       directory,
       user,
       slaveId,
@@ -1258,6 +1314,7 @@ Future<bool> MesosContainerizerProcess::_launch(
 
   CHECK_EQ(container->state, PREPARING);
   CHECK_READY(container->launchInfos);
+  CHECK_SOME(container->config);
 
   ContainerLaunchInfo launchInfo;
 
@@ -1392,7 +1449,7 @@ Future<bool> MesosContainerizerProcess::_launch(
 
   // Determine the launch command for the container.
   if (!launchInfo.has_command()) {
-    launchInfo.mutable_command()->CopyFrom(container->config.command_info());
+    launchInfo.mutable_command()->CopyFrom(container->config->command_info());
   }
 
   // For the command executor case, we should add the rootfs flag to
@@ -1400,10 +1457,10 @@ Future<bool> MesosContainerizerProcess::_launch(
   // TODO(jieyu): Remove this once we no longer support the old style
   // command task (i.e., that uses mesos-execute).
   // TODO(jieyu): Consider move this to filesystem isolator.
-  if (container->config.has_task_info() &&
-      container->config.has_rootfs()) {
+  if (container->config->has_task_info() &&
+      container->config->has_rootfs()) {
     launchInfo.mutable_command()->add_arguments(
-        "--rootfs=" + container->config.rootfs());
+        "--rootfs=" + container->config->rootfs());
   }
 
   // TODO(jieyu): 'uris', 'environment' and 'user' in the launch
@@ -1439,8 +1496,8 @@ Future<bool> MesosContainerizerProcess::_launch(
 
   // TODO(klueska): Remove the check below once we have a good way of
   // setting the sandbox directory for DEBUG containers.
-  if (!container->config.has_container_class() ||
-       container->config.container_class() != ContainerClass::DEBUG) {
+  if (!container->config->has_container_class() ||
+       container->config->container_class() != ContainerClass::DEBUG) {
     // TODO(jieyu): Consider moving this to filesystem isolator.
     //
     // NOTE: For the command executor case, although it uses the host
@@ -1449,17 +1506,17 @@ Future<bool> MesosContainerizerProcess::_launch(
     // itself does not use this environment variable.
     Environment::Variable* variable = containerEnvironment->add_variables();
     variable->set_name("MESOS_SANDBOX");
-    variable->set_value(container->config.has_rootfs()
+    variable->set_value(container->config->has_rootfs()
       ? flags.sandbox_directory
-      : container->config.directory());
+      : container->config->directory());
   }
 
   containerEnvironment->MergeFrom(isolatorEnvironment);
 
   // Include any user specified environment variables.
-  if (container->config.command_info().has_environment()) {
+  if (container->config->command_info().has_environment()) {
     containerEnvironment->MergeFrom(
-        container->config.command_info().environment());
+        container->config->command_info().environment());
   }
 
   // Determine the rootfs for the container to be launched.
@@ -1467,9 +1524,9 @@ Future<bool> MesosContainerizerProcess::_launch(
   // NOTE: Command task is a special case. Even if the container
   // config has a root filesystem, the executor container still uses
   // the host filesystem.
-  if (!container->config.has_task_info() &&
-       container->config.has_rootfs()) {
-    launchInfo.set_rootfs(container->config.rootfs());
+  if (!container->config->has_task_info() &&
+       container->config->has_rootfs()) {
+    launchInfo.set_rootfs(container->config->rootfs());
   }
 
   // Determine the working directory for the container.
@@ -1489,20 +1546,20 @@ Future<bool> MesosContainerizerProcess::_launch(
                    << "host filesystem";
     }
 
-    launchInfo.set_working_directory(container->config.directory());
+    launchInfo.set_working_directory(container->config->directory());
   }
 
   // TODO(klueska): Debug containers should set their working
   // directory to their sandbox directory (once we know how to set
   // that properly).
-  if (container->config.has_container_class() &&
-      container->config.container_class() == ContainerClass::DEBUG) {
+  if (container->config->has_container_class() &&
+      container->config->container_class() == ContainerClass::DEBUG) {
     launchInfo.clear_working_directory();
   }
 
   // Determine the user to launch the container as.
-  if (container->config.has_user()) {
-    launchInfo.set_user(container->config.user());
+  if (container->config->has_user()) {
+    launchInfo.set_user(container->config->user());
   }
 
   // Use a pipe to block the child until it's been isolated.
@@ -1630,8 +1687,8 @@ Future<bool> MesosContainerizerProcess::_launch(
     const string& path = slave::paths::getForkedPidPath(
         slave::paths::getMetaRootDir(flags.work_dir),
         slaveId,
-        container->config.executor_info().framework_id(),
-        container->config.executor_info().executor_id(),
+        container->config->executor_info().framework_id(),
+        container->config->executor_info().executor_id(),
         containerId);
 
     LOG(INFO) << "Checkpointing container's forked pid " << pid
@@ -1859,9 +1916,9 @@ Future<bool> MesosContainerizerProcess::launch(
   // TODO(jieyu): This is currently best effort. After the agent fails
   // over, 'executor_info' won't be set in root parent container's
   // 'config'. Consider populating 'executor_info' in recover path.
-  if (containers_[rootContainerId]->config.has_executor_info()) {
+  if (containers_[rootContainerId]->config->has_executor_info()) {
     containerConfig.mutable_executor_info()->CopyFrom(
-        containers_[rootContainerId]->config.executor_info());
+        containers_[rootContainerId]->config->executor_info());
   }
 
   return launch(containerId,

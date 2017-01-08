@@ -25,6 +25,7 @@
 namespace unix = process::network::unix;
 #endif // __WINDOWS__
 
+using mesos::slave::ContainerConfig;;
 using mesos::slave::ContainerTermination;
 
 using std::list;
@@ -393,6 +394,32 @@ Try<ContainerID> parseSandboxPath(
   }
 
   return currentContainerId;
+}
+
+
+Result<ContainerConfig> getContainerConfig(
+    const string& runtimeDir,
+    const ContainerID& containerId)
+{
+  const string path = path::join(
+      getRuntimePath(runtimeDir, containerId),
+      CONTAINER_CONFIG_FILE);
+
+  if (!os::exists(path)) {
+    // This is possible if we recovered a container launched before we
+    // started to checkpoint `ContainerConfig`.
+    return None();
+  }
+
+  const Result<ContainerConfig>& containerConfig =
+    ::protobuf::read<ContainerConfig>(path);
+
+  if (containerConfig.isError()) {
+    return Error("Failed to read launch config of container:"
+                 " " + containerConfig.error());
+  }
+
+  return containerConfig;
 }
 
 } // namespace paths {
