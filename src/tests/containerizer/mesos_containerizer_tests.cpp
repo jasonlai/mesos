@@ -748,6 +748,13 @@ TEST_F(MesosContainerizerDestroyTest, DestroyWhileFetching)
   containerId.set_value(UUID::random().toString());
 
   TaskInfo taskInfo;
+  taskInfo.set_name("task_name");
+  taskInfo.mutable_task_id()->set_value("task_id");
+
+  SlaveID slaveId = SlaveID();
+  slaveId.set_value("slave_id");
+  taskInfo.mutable_slave_id()->CopyFrom(slaveId);
+
   CommandInfo commandInfo;
   taskInfo.mutable_command()->MergeFrom(commandInfo);
 
@@ -757,7 +764,7 @@ TEST_F(MesosContainerizerDestroyTest, DestroyWhileFetching)
       createExecutorInfo("executor", "exit 0"),
       os::getcwd(),
       None(),
-      SlaveID(),
+      slaveId,
       map<string, string>(),
       false);
 
@@ -817,6 +824,13 @@ TEST_F(MesosContainerizerDestroyTest, DestroyWhilePreparing)
   containerId.set_value(UUID::random().toString());
 
   TaskInfo taskInfo;
+  taskInfo.set_name("task_name");
+  taskInfo.mutable_task_id()->set_value("task_id");
+
+  SlaveID slaveId = SlaveID();
+  slaveId.set_value("slave_id");
+  taskInfo.mutable_slave_id()->CopyFrom(slaveId);
+
   CommandInfo commandInfo;
   taskInfo.mutable_command()->MergeFrom(commandInfo);
 
@@ -951,8 +965,16 @@ TEST_F(MesosContainerizerProvisionerTest, ProvisionFailed)
   containerInfo.mutable_mesos()->CopyFrom(mesosInfo);
 
   TaskInfo taskInfo;
+  taskInfo.set_name("task_name");
+  taskInfo.mutable_task_id()->set_value("task_id");
+
+  SlaveID slaveId = SlaveID();
+  slaveId.set_value("slave_id");
+  taskInfo.mutable_slave_id()->CopyFrom(slaveId);
+
   CommandInfo commandInfo;
   taskInfo.mutable_command()->MergeFrom(commandInfo);
+
   taskInfo.mutable_container()->CopyFrom(containerInfo);
 
   ExecutorInfo executorInfo = createExecutorInfo("executor", "exit 0");
@@ -1039,8 +1061,16 @@ TEST_F(MesosContainerizerProvisionerTest, DestroyWhileProvisioning)
   containerInfo.mutable_mesos()->CopyFrom(mesosInfo);
 
   TaskInfo taskInfo;
+  taskInfo.set_name("task_name");
+  taskInfo.mutable_task_id()->set_value("task_id");
+
+  SlaveID slaveId = SlaveID();
+  slaveId.set_value("slave_id");
+  taskInfo.mutable_slave_id()->CopyFrom(slaveId);
+
   CommandInfo commandInfo;
   taskInfo.mutable_command()->MergeFrom(commandInfo);
+
   taskInfo.mutable_container()->CopyFrom(containerInfo);
 
   ExecutorInfo executorInfo = createExecutorInfo("executor", "exit 0");
@@ -1134,8 +1164,16 @@ TEST_F(MesosContainerizerProvisionerTest, IsolatorCleanupBeforePrepare)
   containerInfo.mutable_mesos()->CopyFrom(mesosInfo);
 
   TaskInfo taskInfo;
+  taskInfo.set_name("task_name");
+  taskInfo.mutable_task_id()->set_value("task_id");
+
+  SlaveID slaveId = SlaveID();
+  slaveId.set_value("slave_id");
+  taskInfo.mutable_slave_id()->CopyFrom(slaveId);
+
   CommandInfo commandInfo;
   taskInfo.mutable_command()->MergeFrom(commandInfo);
+
   taskInfo.mutable_container()->CopyFrom(containerInfo);
 
   ExecutorInfo executorInfo = createExecutorInfo("executor", "exit 0");
@@ -1214,6 +1252,13 @@ TEST_F(MesosContainerizerDestroyTest, LauncherDestroyFailure)
   containerId.set_value(UUID::random().toString());
 
   TaskInfo taskInfo;
+  taskInfo.set_name("task_name");
+  taskInfo.mutable_task_id()->set_value("task_id");
+
+  SlaveID slaveId = SlaveID();
+  slaveId.set_value("slave_id");
+  taskInfo.mutable_slave_id()->CopyFrom(slaveId);
+
   CommandInfo commandInfo;
   taskInfo.mutable_command()->MergeFrom(commandInfo);
 
