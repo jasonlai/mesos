@@ -91,6 +91,9 @@ public:
 
   virtual process::Future<hashset<ContainerID>> containers();
 
+  virtual process::Future<Nothing> pruneImages(
+      const std::vector<mesos::Image>& excludeImages);
+
 private:
   ComposingContainerizerProcess* process;
 };

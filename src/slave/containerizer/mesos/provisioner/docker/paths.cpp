@@ -18,6 +18,8 @@
 
 #include "slave/containerizer/mesos/provisioner/docker/paths.hpp"
 
+#include <process/clock.hpp>
+
 #include <stout/path.hpp>
 
 using std::string;
@@ -104,6 +106,20 @@ string getImageArchiveTarPath(const string& discoveryDir, const string& name)
 string getStoredImagesPath(const string& storeDir)
 {
   return path::join(storeDir, "storedImages");
+}
+
+
+string getSweepingDir(const string& storeDir)
+{
+  return path::join(storeDir, "gc");
+}
+
+
+string getSweepingLayerPath(const string& storeDir, const string& layerId)
+{
+  const string layerPath =
+    layerId + "." + stringify(process::Clock::now().duration().ns());
+  return path::join(getSweepingDir(storeDir), layerPath);
 }
 
 } // namespace paths {

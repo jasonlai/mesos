@@ -95,6 +95,19 @@ public:
       bool cached);
 
   /**
+   * Prune images from the metadata manager by comparing
+   * existing images with active images in use. This function will
+   * remove all images not used anymore, and return the list of
+   * layers which are not referenced anymore. The caller should
+   * ensure such layers are properly removed from the system.
+   *
+   * @param activeImages all images which are actively used.
+   * @return a list of layers not referenced anymore.
+   */
+  process::Future<std::vector<Layer>> prune(
+      const std::vector<::docker::spec::ImageReference>& activeImages);
+
+  /**
    * Store a layer. This is only used for backfilling layer size
    * after agent recovers unknown layers.
    *

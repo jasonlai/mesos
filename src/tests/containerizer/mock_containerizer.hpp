@@ -95,6 +95,11 @@ public:
   MOCK_METHOD0(
       containers,
       process::Future<hashset<ContainerID>>());
+
+  MOCK_METHOD1(
+      pruneImages,
+      process::Future<Nothing>(const std::vector<mesos::Image>&));
+
 };
 
 } // namespace tests {

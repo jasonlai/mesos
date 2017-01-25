@@ -593,6 +593,15 @@ Future<hashset<ContainerID>> MesosContainerizer::containers()
 }
 
 
+Future<Nothing> MesosContainerizer::pruneImages(
+    const vector<Image>& excludeImages)
+{
+  return dispatch(process.get(),
+                  &MesosContainerizerProcess::pruneImages,
+                  excludeImages);
+}
+
+
 Future<Nothing> MesosContainerizerProcess::recover(
     const Option<state::SlaveState>& state)
 {
@@ -2571,6 +2580,33 @@ void MesosContainerizerProcess::limited(
 Future<hashset<ContainerID>> MesosContainerizerProcess::containers()
 {
   return containers_.keys();
+}
+
+
+Future<Nothing> MesosContainerizerProcess::pruneImages(
+    const vector<Image>& excludeImages)
+{
+  vector<Image> activeImages;
+  activeImages.reserve(excludeImages.size() + containers_.size());
+
+  foreachvalue(const Owned<Container>& container, containers_) {
+    if (container->config.isNone()) {
+      return Failure(
+          "Some containers are recovered without ContainerConfig "
+          "and image prune is disabled.");
+    }
+
+    const ContainerConfig& containerConfig = container->config.get();
+    if (containerConfig.has_container_info() &&
+        containerConfig.container_info().mesos().has_image()) {
+      activeImages.push_back(containerConfig.container_info().mesos().image());
+    }
+  }
+
+  activeImages.insert(activeImages.end(), excludeImages.begin(), excludeImages.end());
+  // TODO(zhitao): call unique.
+
+  return provisioner->pruneImages(activeImages);
 }
 
 

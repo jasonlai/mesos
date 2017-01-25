@@ -15,6 +15,7 @@
 // limitations under the License.
 
 #include <string>
+#include <vector>
 
 #include <mesos/type_utils.hpp>
 
@@ -31,6 +32,7 @@
 using namespace process;
 
 using std::string;
+using std::vector;
 
 namespace mesos {
 namespace internal {
@@ -78,6 +80,13 @@ Try<hashmap<Image::Type, Owned<Store>>> Store::create(const Flags& flags)
   }
 
   return stores;
+}
+
+
+Future<Nothing> Store::prune(
+    const vector<Image>& activeImages)
+{
+  return Nothing();
 }
 
 } // namespace slave {

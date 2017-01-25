@@ -84,6 +84,16 @@ public:
   virtual process::Future<ImageInfo> get(
       const Image& image,
       const std::string& backend) = 0;
+
+  // Prune unused images from the given store.
+  // A list of images which are being actively used by all existing
+  // containers will be collected by the caller and passed in.
+  // The implementation should ensure that images being actively
+  // used will not be pruned from the store.
+  // If the store has not implemented this API yet, it can simply
+  // return None to indicate no image will be pruned.
+  virtual process::Future<Nothing> prune(
+    const std::vector<Image>& activeImages);
 };
 
 } // namespace slave {

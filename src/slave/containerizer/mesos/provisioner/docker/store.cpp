@@ -81,11 +81,13 @@ public:
       layersMb(
           "containerizer/mesos/docker_store/layers_mb",
           defer(self(), &StoreProcess::_layersMb)),
+      markingTimer("containerizer/mesos/docker_store/marking", Hours(1)),
       pullTimer("containerizer/mesos/docker_store/pull", Hours(1))
   {
     process::metrics::add(layers);
     process::metrics::add(layersMb);
     process::metrics::add(layersPulled);
+    process::metrics::add(markingTimer);
     process::metrics::add(pullTimer);
   }
 
@@ -94,6 +96,7 @@ public:
     process::metrics::remove(layers);
     process::metrics::remove(layersMb);
     process::metrics::remove(layersPulled);
+    process::metrics::remove(markingTimer);
     process::metrics::remove(pullTimer);
   }
 
@@ -102,6 +105,8 @@ public:
   Future<ImageInfo> get(
       const mesos::Image& image,
       const string& backend);
+
+  Future<Nothing> prune(const vector<mesos::Image>& activeImages);
 
 private:
   Future<Nothing> _recover(const vector<Layer>& layers);
@@ -133,9 +138,22 @@ private:
       const string& layerId,
       const Bytes& bytes);
 
+  Future<Nothing> _prune(
+      const vector<Layer>& prunedLayers);
+
+  Future<Nothing> sweeping();
+
+  Future<Nothing> _unlockPrune();
+
   Future<double> _layers();
 
   Future<double> _layersMb();
+
+  struct Queued {
+    Owned<Promise<ImageInfo>> promise;
+    mesos::Image image;
+    string backend;
+  };
 
   const Flags flags;
 
@@ -146,9 +164,13 @@ private:
   DiskUsageCollector collector;
   hashmap<string, Bytes> layerBytes;
 
+  Option<vector<mesos::Image>> pruning;
+  list<Queued> queued;
+
   process::metrics::Gauge layers;
   process::metrics::Counter layersPulled;
   process::metrics::Gauge layersMb;
+  process::metrics::Timer<Milliseconds> markingTimer;
   process::metrics::Timer<Milliseconds> pullTimer;
 };
 
@@ -199,6 +221,12 @@ Try<Owned<slave::Store>> Store::create(
                  mkdir.error());
   }
 
+  mkdir = os::mkdir(paths::getSweepingDir(flags.docker_store_dir));
+  if (mkdir.isError()) {
+    return Error("Failed to create Docker store sweeping directory: " +
+                 mkdir.error());
+  }
+
   Try<Owned<MetadataManager>> metadataManager = MetadataManager::create(flags);
   if (metadataManager.isError()) {
     return Error(metadataManager.error());
@@ -235,6 +263,12 @@ Future<ImageInfo> Store::get(
     const string& backend)
 {
   return dispatch(process.get(), &StoreProcess::get, image, backend);
+}
+
+
+Future<Nothing> Store::prune(const vector<mesos::Image>& activeImages)
+{
+  return dispatch(process.get(), &StoreProcess::prune, activeImages);
 }
 
 
@@ -288,6 +322,20 @@ Future<ImageInfo> StoreProcess::get(
   if (reference.isError()) {
     return Failure("Failed to parse docker image '" + image.docker().name() +
                    "': " + reference.error());
+  }
+
+  const string name = stringify(reference.get());
+
+  if (pruning.isSome()) {
+    VLOG(1) << "Queuing get to image " << name << " because of ongoing pruning.";
+    Queued element;
+    element.promise.reset(new Promise<ImageInfo>());
+    element.image = image;
+    element.backend = backend;
+
+    queued.push_back(element);
+
+    return element.promise->future();
   }
 
   return metadataManager->get(reference.get(), image.cached())
@@ -548,6 +596,123 @@ Future<double> StoreProcess::_layersMb()
     result += bytes.megabytes();
   }
   return result;
+}
+
+
+Future<Nothing> StoreProcess::prune(
+    const vector<mesos::Image>& activeImages)
+{
+  // We only allow one image pruning happening at any time.
+  if (pruning.isSome()) {
+    return Failure("Another pruning is already happening!");
+  }
+
+  vector<spec::ImageReference> references;
+  references.reserve(activeImages.size());
+
+  foreach (const mesos::Image& image, activeImages) {
+    Try<spec::ImageReference> reference =
+      spec::parseImageReference(image.docker().name());
+
+    if (reference.isError()) {
+      return Failure("Failed to parse docker image '" + image.docker().name() +
+                     "': " + reference.error());
+    }
+
+    references.push_back(reference.get());
+  }
+
+  pruning = activeImages;
+
+  Future<Nothing> marking = metadataManager->prune(references)
+    .then(defer(self(), &Self::_prune, lambda::_1))
+    .onAny(defer(self(), &Self::_unlockPrune));
+
+  marking = markingTimer.time(marking);
+  return marking.then(defer(self(), &Self::sweeping));
+}
+
+
+Future<Nothing> StoreProcess::_unlockPrune()
+{
+  // We only allow one image pruning happening at any time.
+  if (!pruning.isSome()) {
+    LOG(WARNING) << "Store lock is already unlocked!";
+  }
+
+  pruning = None();
+
+  list<Future<ImageInfo>> futures;
+
+  foreach (const Queued& element, queued) {
+    Future<ImageInfo> future =
+      dispatch(self(), &StoreProcess::get, element.image, element.backend);
+    element.promise->associate(future);
+    futures.push_back(future);
+  }
+
+  // NOTE: the underlying promises will go out of scope and be
+  // destructed here. Make sure this is correct in libprocess
+  // semantic before committing.
+  queued.clear();
+
+  return Nothing();
+}
+
+
+Future<Nothing> StoreProcess::_prune(
+    const vector<Layer>& prunedLayers)
+{
+  foreach (const Layer& layer, prunedLayers) {
+    const string& id = layer.id();
+    const string layerPath = paths::getImageLayerPath(flags.docker_store_dir, id);
+    const string target = paths::getSweepingLayerPath(flags.docker_store_dir, id);
+
+    if (!os::exists(layerPath)) {
+      return Failure("Marking phase source " + layerPath + " does not exist!");
+    }
+
+    if (os::exists(target)) {
+      return Failure("Marking phase target " + target + " already exists!");
+    }
+
+    Try<Nothing> rename = os::rename(layerPath, target);
+    if (rename.isError()) {
+      return Failure(
+          "Failed to move layer from '" + layerPath +
+          "' to '" + target + "': " + rename.error());
+    }
+
+    layerBytes.erase(id);
+    // TODO(zhitao): Add tracking for sweeping directory.
+  }
+
+  return Nothing();
+}
+
+
+Future<Nothing> StoreProcess::sweeping()
+{
+  const string sweepingDir = paths::getSweepingDir(flags.docker_store_dir);
+  Try<list<string>> targets = os::ls(sweepingDir);
+  if (targets.isError()) {
+    return Failure(targets.error());
+  }
+
+  foreach (const string& layerDir, targets.get()) {
+    const string target = path::join(sweepingDir, layerDir);
+    Try<Nothing> rmdir = os::rmdir(target);
+    if (rmdir.isError()) {
+      // Here, we proceed to the next layer directory without
+      // retry in the hope that next pruning process will clean this up.
+      LOG(WARNING) << "Cannot remove directory " << target << ": " << rmdir.error();
+    } else {
+      VLOG(1) << "Removed layer directry " << target;
+    }
+    // TODO(zhitao): Add tracking for sweeping directory.
+  }
+
+  return Nothing();
 }
 
 } // namespace docker {

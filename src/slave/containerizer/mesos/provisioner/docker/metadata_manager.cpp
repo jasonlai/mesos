@@ -70,6 +70,9 @@ public:
       const spec::ImageReference& reference,
       bool cached);
 
+  Future<vector<Layer>> prune(
+      const vector<spec::ImageReference>& activeImages);
+
   Future<Nothing> putLayer(const Layer& layer);
 
   // TODO(chenlily): Implement removal of unreferenced images.
@@ -143,6 +146,16 @@ Future<Option<pair<Image, vector<Layer>>>> MetadataManager::get(
 }
 
 
+Future<vector<Layer>> MetadataManager::prune(
+    const vector<spec::ImageReference>& activeImages)
+{
+  return dispatch(
+    process.get(),
+    &MetadataManagerProcess::prune,
+    activeImages);
+}
+
+
 Future<Nothing> MetadataManager::putLayer(
     const Layer& layer)
 {
@@ -213,6 +226,65 @@ Future<Option<pair<Image, vector<Layer>>>> MetadataManagerProcess::get(
   }
 
   return std::make_pair(image, layers);
+}
+
+
+Future<vector<Layer>> MetadataManagerProcess::prune(
+    const vector<spec::ImageReference>& activeImages)
+{
+  hashmap<string, Image> retainedImages;
+  hashmap<string, Layer> retainedLayers;
+
+  foreach (const spec::ImageReference& reference, activeImages) {
+    const string imageName = stringify(reference);
+    Option<Image> image = storedImages.get(imageName);
+
+    if (image.isNone()) {
+      // This is possible if docker store was cleaned
+      // in a recovery after the container using this image was
+      // launched.
+      VLOG(1) << "Active docker image '" << imageName 
+              << "' is not stored in metadata manager.";
+      continue;
+    }
+
+    storedImages[imageName] = image.get();
+
+    foreach (const string& layerId, image.get().layer_ids()) {
+      if (retainedLayers.contains(layerId)) {
+        continue;
+      }
+
+      Option<Layer> layer = storedLayers.get(layerId);
+      if (layer.isNone()) {
+        return Failure(
+            "Layer id '" + layerId + "' in image '" + imageName +
+            "' is not in stored previously!");
+      }
+
+      retainedLayers[layerId] = layer.get();
+    }
+  }
+
+  vector<Layer> prunedLayers;
+
+  foreachpair (const string& layerId, const Layer& layer, storedLayers) {
+    if (retainedLayers.contains(layerId)) {
+      continue;
+    }
+
+    prunedLayers.push_back(layer);
+  }
+
+  storedImages.swap(retainedImages);
+  storedLayers.swap(retainedLayers);
+
+  Try<Nothing> status = persist();
+  if (status.isError()) {
+    return Failure("Failed to save state of Docker images: " + status.error());
+  }
+
+  return prunedLayers;
 }
 
 

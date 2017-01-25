@@ -93,6 +93,14 @@ std::string getImageArchiveTarPath(
 
 std::string getStoredImagesPath(const std::string& storeDir);
 
+
+std::string getSweepingDir(const std::string& storeDir);
+
+
+std::string getSweepingLayerPath(
+    const std::string& storeDir,
+    const std::string& layerId);
+
 } // namespace paths {
 } // namespace docker {
 } // namespace slave {

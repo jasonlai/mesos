@@ -151,6 +151,9 @@ public:
   virtual process::Future<bool> destroy(const ContainerID& containerId) = 0;
 
   virtual process::Future<hashset<ContainerID>> containers() = 0;
+
+  virtual process::Future<Nothing> pruneImages(
+      const std::vector<mesos::Image>& excludeImages) = 0;
 };
 
 } // namespace slave {

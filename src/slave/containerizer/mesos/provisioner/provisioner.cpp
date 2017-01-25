@@ -304,6 +304,15 @@ Future<bool> Provisioner::destroy(const ContainerID& containerId) const
 }
 
 
+Future<Nothing> Provisioner::pruneImages(const vector<Image>& activeImages) const
+{
+  return dispatch(
+      CHECK_NOTNULL(process.get()),
+      &ProvisionerProcess::pruneImages,
+      activeImages);
+}
+
+
 ProvisionerProcess::ProvisionerProcess(
     const string& _rootDir,
     const string& _defaultBackend,
@@ -609,6 +618,29 @@ Future<bool> ProvisionerProcess::__destroy(const ContainerID& containerId)
   infos.erase(containerId);
 
   return true;
+}
+
+
+Future<Nothing> ProvisionerProcess::pruneImages(
+    const vector<Image>& activeImages)
+{
+  list<Future<Nothing>> futures;
+
+  foreachpair(const Image::Type& type, const Owned<Store>& store, stores) {
+    vector<Image> images;
+    foreach(const Image& image, activeImages) {
+      if (image.type() == type) {
+        images.push_back(image);
+      }
+    }
+
+    futures.push_back(store.get()->prune(images));
+  }
+
+  return collect(futures)
+    .then(defer(self(), [=](const list<Nothing>&) {
+      return Nothing();
+    }));
 }
 
 

@@ -98,6 +98,9 @@ public:
   // provisioned root filesystem for the given container.
   virtual process::Future<bool> destroy(const ContainerID& containerId) const;
 
+  virtual process::Future<Nothing> pruneImages(
+      const std::vector<Image>& activeImages) const;
+
 protected:
   Provisioner() {} // For creating mock object.
 
@@ -127,6 +130,9 @@ public:
       const Image& image);
 
   process::Future<bool> destroy(const ContainerID& containerId);
+
+  process::Future<Nothing> pruneImages(
+      const std::vector<Image>& activeImages);
 
 private:
   process::Future<ProvisionInfo> _provision(

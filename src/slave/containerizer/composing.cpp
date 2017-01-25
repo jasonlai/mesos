@@ -102,6 +102,8 @@ public:
 
   Future<hashset<ContainerID>> containers();
 
+  Future<Nothing> pruneImages(const vector<Image>& excludeImages);
+
 private:
   // Continuations.
   Future<Nothing> _recover();
@@ -274,6 +276,13 @@ Future<bool> ComposingContainerizer::destroy(const ContainerID& containerId)
 Future<hashset<ContainerID>> ComposingContainerizer::containers()
 {
   return dispatch(process, &ComposingContainerizerProcess::containers);
+}
+
+
+Future<Nothing> ComposingContainerizer::pruneImages(
+    const vector<Image>& excludeImages)
+{
+  return dispatch(process, &ComposingContainerizerProcess::pruneImages, excludeImages);
 }
 
 
@@ -694,6 +703,22 @@ Future<bool> ComposingContainerizerProcess::destroy(
 Future<hashset<ContainerID>> ComposingContainerizerProcess::containers()
 {
   return containers_.keys();
+}
+
+
+Future<Nothing> ComposingContainerizerProcess::pruneImages(
+    const vector<Image>& excludeImages)
+{
+  list<Future<Nothing>> futures;
+
+  foreach (Containerizer* containerizer, containerizers_) {
+    futures.push_back(containerizer->pruneImages(excludeImages));
+  }
+
+  return collect(futures)
+    .then([](const list<Nothing>&) {
+      return Nothing();
+    });
 }
 
 } // namespace slave {

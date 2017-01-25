@@ -54,6 +54,9 @@ public:
       const mesos::Image& image,
       const std::string& backend);
 
+  virtual process::Future<Nothing> prune(
+      const std::vector<mesos::Image>& activeImages);
+
 private:
   explicit Store(process::Owned<StoreProcess> process);
 
