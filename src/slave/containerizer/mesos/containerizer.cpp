@@ -603,6 +603,12 @@ Future<Nothing> MesosContainerizer::remove(const ContainerID& containerId)
 }
 
 
+Future<Nothing> MesosContainerizer::pruneImages()
+{
+  return dispatch(process.get(), &MesosContainerizerProcess::pruneImages);
+}
+
+
 Future<Nothing> MesosContainerizerProcess::recover(
     const Option<state::SlaveState>& state)
 {
@@ -2704,6 +2710,38 @@ void MesosContainerizerProcess::limited(
 Future<hashset<ContainerID>> MesosContainerizerProcess::containers()
 {
   return containers_.keys();
+}
+
+
+Future<Nothing> MesosContainerizerProcess::pruneImages()
+{
+  vector<ProvisionInfo> provisionInfos;
+  provisionInfos.reserve(containers_.size());
+
+  vector<Image> activeImages;
+  activeImages.reserve(containers_.size());
+
+  foreachvalue(const Owned<Container>& container, containers_) {
+    // ContainerConfig checkpoint is added recently, so it is still possible
+    // that certain containers are recovered without config.
+    // We cannot safely handle these containers because we do not know which
+    // image(s) they use, so we will disable image pruning.
+    if (container->config.isNone()) {
+      return Failure(
+          "Some containers are recovered without ContainerConfig "
+          "and image prune is disabled.");
+    }
+
+    const ContainerConfig& containerConfig = container->config.get();
+    if (containerConfig.has_container_info() &&
+        containerConfig.container_info().mesos().has_image()) {
+      activeImages.push_back(containerConfig.container_info().mesos().image());
+    }
+  }
+
+  // TODO(zhitao): use std::unique to deduplicate `activeImages`.
+
+  return provisioner->pruneImages(activeImages);
 }
 
 

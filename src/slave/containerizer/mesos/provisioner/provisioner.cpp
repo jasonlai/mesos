@@ -32,6 +32,7 @@
 #include <stout/foreach.hpp>
 #include <stout/hashmap.hpp>
 #include <stout/hashset.hpp>
+#include <stout/lambda.hpp>
 #include <stout/os.hpp>
 #include <stout/stringify.hpp>
 #include <stout/uuid.hpp>
@@ -55,6 +56,7 @@ using std::vector;
 using process::Failure;
 using process::Future;
 using process::Owned;
+using process::ReadWriteLock;
 
 using mesos::internal::slave::AUFS_BACKEND;
 using mesos::internal::slave::BIND_BACKEND;
@@ -347,6 +349,16 @@ Future<bool> Provisioner::destroy(const ContainerID& containerId) const
 }
 
 
+Future<Nothing> Provisioner::pruneImages(
+    const vector<Image>& activeImages) const
+{
+  return dispatch(
+      CHECK_NOTNULL(process.get()),
+      &ProvisionerProcess::pruneImages,
+      activeImages);
+}
+
+
 ProvisionerProcess::ProvisionerProcess(
     const string& _rootDir,
     const string& _defaultBackend,
@@ -471,6 +483,18 @@ Future<ProvisionInfo> ProvisionerProcess::provision(
     const ContainerID& containerId,
     const Image& image)
 {
+  // destroy and provision can happen concurrently, but pruneImages is
+  // exclusive.
+  return rwLock.read_lock()
+    .then(defer(self(), &Self::provisionInLock, containerId, image))
+    .onAny(lambda::bind(&ReadWriteLock::read_unlock, rwLock));
+}
+
+
+Future<ProvisionInfo> ProvisionerProcess::provisionInLock(
+    const ContainerID& containerId,
+    const Image& image)
+{
   if (!stores.contains(image.type())) {
     return Failure(
         "Unsupported container image type: " +
@@ -541,6 +565,16 @@ Future<ProvisionInfo> ProvisionerProcess::_provision(
 
 
 Future<bool> ProvisionerProcess::destroy(const ContainerID& containerId)
+{
+  // destroy and provision can happen concurrently, but pruneImages is
+  // exclusive.
+  return rwLock.read_lock()
+    .then(defer(self(), &Self::destroyInLock, containerId))
+    .onAny(lambda::bind(&ReadWriteLock::read_unlock, rwLock));
+}
+
+
+Future<bool> ProvisionerProcess::destroyInLock(const ContainerID& containerId)
 {
   if (!infos.contains(containerId)) {
     VLOG(1) << "Ignoring destroy request for unknown container " << containerId;
@@ -671,6 +705,52 @@ Future<bool> ProvisionerProcess::__destroy(const ContainerID& containerId)
   infos.erase(containerId);
 
   return true;
+}
+
+
+Future<Nothing> ProvisionerProcess::pruneImages(
+    const vector<Image>& activeImages)
+{
+  // destroy and provision can happen concurrently, but pruneImages is
+  // exclusive.
+  return rwLock.write_lock()
+    .then(defer(self(), &Self::pruneInLock, activeImages))
+    .onAny(lambda::bind(&ReadWriteLock::write_unlock, rwLock));
+}
+
+
+Future<Nothing> ProvisionerProcess::pruneInLock(
+    const vector<Image>& activeImages)
+{
+  hashset<string> activeLayerPaths;
+
+  foreachvalue(const Owned<Info>& info, infos) {
+    if (!info->layers.isSome()) {
+      continue;
+    }
+
+    activeLayerPaths.insert(
+        info->layers->begin(),
+        info->layers->end());
+  }
+
+  list<Future<Nothing>> futures;
+
+  foreachpair(const Image::Type& type, const Owned<Store>& store, stores) {
+    vector<Image> images;
+    foreach(const Image& image, activeImages) {
+      if (image.type() == type) {
+        images.push_back(image);
+      }
+    }
+
+    futures.push_back(store.get()->prune(images, activeLayerPaths));
+  }
+
+  return collect(futures)
+    .then(defer(self(), [=](const list<Nothing>&) {
+      return Nothing();
+    }));
 }
 
 

@@ -67,7 +67,8 @@ public:
       const spec::ImageReference& reference,
       bool cached);
 
-  // TODO(chenlily): Implement removal of unreferenced images.
+  Future<hashset<string>> prune(
+      const vector<spec::ImageReference>& activeImages);
 
 private:
   // Write out metadata manager state to persistent store.
@@ -79,6 +80,9 @@ private:
   // by image name.
   // For example, "ubuntu:14.04" -> ubuntu14:04 Image.
   hashmap<string, Image> storedImages;
+
+  // This is all layer ids stored in metadata manager.
+  hashset<string> storedLayers;
 };
 
 
@@ -134,6 +138,16 @@ Future<Option<Image>> MetadataManager::get(
 }
 
 
+Future<hashset<string>> MetadataManager::prune(
+    const vector<spec::ImageReference>& activeImages)
+{
+  return dispatch(
+      process.get(),
+      &MetadataManagerProcess::prune,
+      activeImages);
+}
+
+
 Future<Image> MetadataManagerProcess::put(
     const spec::ImageReference& reference,
     const vector<string>& layerIds)
@@ -144,6 +158,7 @@ Future<Image> MetadataManagerProcess::put(
   dockerImage.mutable_reference()->CopyFrom(reference);
   foreach (const string& layerId, layerIds) {
     dockerImage.add_layer_ids(layerId);
+    storedLayers.insert(layerId);
   }
 
   storedImages[imageReference] = dockerImage;
@@ -177,6 +192,45 @@ Future<Option<Image>> MetadataManagerProcess::get(
   }
 
   return storedImages[imageReference];
+}
+
+
+Future<hashset<string>> MetadataManagerProcess::prune(
+    const vector<spec::ImageReference>& activeImages)
+{
+  hashmap<string, Image> retainedImages;
+  hashset<string> retainedLayers;
+
+  foreach (const spec::ImageReference& reference, activeImages) {
+    const string imageName = stringify(reference);
+    Option<Image> image = storedImages.get(imageName);
+
+    if (image.isNone()) {
+      // This is possible if docker store was cleaned
+      // in a recovery after the container using this image was
+      // launched.
+      VLOG(1) << "Active docker image '" << imageName
+              << "' is not stored in metadata manager.";
+      continue;
+    }
+
+    retainedImages[imageName] = image.get();
+
+    foreach (const string& layerId, image->layer_ids()) {
+      retainedLayers.insert(layerId);
+    }
+  }
+
+  storedImages = std::move(retainedImages);
+  // We are returning retainedLayers, so cannot move it.
+  storedLayers = retainedLayers;
+
+  Try<Nothing> status = persist();
+  if (status.isError()) {
+    return Failure("Failed to save state of Docker images: " + status.error());
+  }
+
+  return retainedLayers;
 }
 
 
@@ -223,11 +277,9 @@ Future<Nothing> MetadataManagerProcess::recover()
   foreach (const Image& image, images.get().images()) {
     const string imageReference = stringify(image.reference());
 
-    if (storedImages.contains(imageReference)) {
-      LOG(WARNING) << "Found duplicate image in recovery for image reference '"
-                   << imageReference << "'";
-    } else {
-      storedImages[imageReference] = image;
+    storedImages[imageReference] = image;
+    foreach (const string& layerId, image.layer_ids()) {
+      storedLayers.insert(layerId);
     }
 
     VLOG(1) << "Successfully loaded image '" << imageReference << "'";

@@ -34,6 +34,7 @@
 
 #include <process/future.hpp>
 #include <process/owned.hpp>
+#include <process/rwlock.hpp>
 
 #include <process/metrics/counter.hpp>
 #include <process/metrics/metrics.hpp>
@@ -102,6 +103,12 @@ public:
   // provisioned root filesystem for the given container.
   virtual process::Future<bool> destroy(const ContainerID& containerId) const;
 
+  // Prune images in different stores. Image references in activeImages
+  // will be passed to stores and retained in a best effort fashion.
+  // All layer paths used by active containers will not be pruned.
+  virtual process::Future<Nothing> pruneImages(
+      const std::vector<Image>& activeImages) const;
+
 protected:
   Provisioner() {} // For creating mock object.
 
@@ -132,18 +139,30 @@ public:
 
   process::Future<bool> destroy(const ContainerID& containerId);
 
+  process::Future<Nothing> pruneImages(
+      const std::vector<Image>& activeImages);
+
 private:
+  process::Future<ProvisionInfo> provisionInLock(
+      const ContainerID& containerId,
+      const Image& image);
+
   process::Future<ProvisionInfo> _provision(
       const ContainerID& containerId,
       const Image& image,
       const std::string& backend,
       const ImageInfo& imageInfo);
 
+  process::Future<bool> destroyInLock(const ContainerID& containerId);
+
   process::Future<bool> _destroy(
       const ContainerID& containerId,
       const std::list<process::Future<bool>>& destroys);
 
   process::Future<bool> __destroy(const ContainerID& containerId);
+
+  process::Future<Nothing> pruneInLock(
+      const std::vector<Image>& activeImages);
 
   // Absolute path to the provisioner root directory. It can be
   // derived from '--work_dir' but we keep a separate copy here
@@ -184,6 +203,12 @@ private:
 
     process::metrics::Counter remove_container_errors;
   } metrics;
+
+  // This `ReadWriteLock` instance is used to make sure that while
+  // any `provision` and `destroy` can happen concurrently, `prune`
+  // must be exclusive to other `provision` and `prune` so that we
+  // do not prune image layers which is used in an active `provision`.
+  process::ReadWriteLock rwLock;
 };
 
 } // namespace slave {

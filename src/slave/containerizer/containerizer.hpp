@@ -162,6 +162,9 @@ public:
   {
     return process::Failure("Unsupported");
   }
+
+  // Prune unused images from supported image stores.
+  virtual process::Future<Nothing> pruneImages() = 0;
 };
 
 } // namespace slave {

@@ -31,6 +31,7 @@
 #include <process/future.hpp>
 #include <process/owned.hpp>
 
+#include <stout/hashset.hpp>
 #include <stout/try.hpp>
 
 #include "slave/flags.hpp"
@@ -87,6 +88,14 @@ public:
   virtual process::Future<ImageInfo> get(
       const Image& image,
       const std::string& backend) = 0;
+
+  // Prune unused images from the given store. This is called within
+  // an exclusive lock from `provisioner`, which means any other
+  // image provision or prune are blocked until the future is satsified,
+  // so an implementation should minimize the blocking time.
+  virtual process::Future<Nothing> prune(
+      const std::vector<Image>& excludeImages,
+      const hashset<std::string>& activeLayerPaths);
 };
 
 } // namespace slave {
