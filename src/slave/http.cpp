@@ -599,6 +599,9 @@ Future<Response> Http::_api(
 
     case mesos::agent::Call::ATTACH_CONTAINER_OUTPUT:
       return attachContainerOutput(call, mediaTypes, principal);
+
+    case mesos::agent::Call::PRUNE_IMAGES:
+      return pruneImages(call, mediaTypes, principal);
   }
 
   UNREACHABLE();
@@ -2208,6 +2211,31 @@ Future<JSON::Array> Http::__containers(
         }
 
         return result;
+      });
+}
+
+
+Future<Response> Http::pruneImages(
+    const agent::Call& call,
+    const RequestMediaTypes& mediaTypes,
+    const Option<Principal>& principal) const
+{
+  CHECK_EQ(agent::Call::PRUNE_IMAGES, call.type());
+
+  // TODO(zhitao): Add AuthN/AuthZ.
+
+  const ContentType acceptType = mediaTypes.accept;
+
+  return slave->containerizer->pruneImages()
+      .then([acceptType](const Future<Nothing>& result)
+      ->Future<Response> {
+        if (!result.isReady()) {
+          return result.isFailed()
+            ? InternalServerError(result.failure())
+            : InternalServerError();
+        }
+
+        return OK();
       });
 }
 

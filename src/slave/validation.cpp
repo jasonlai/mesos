@@ -330,6 +330,9 @@ Option<Error> validate(
 
       return None();
     }
+
+    case mesos::agent::Call::PRUNE_IMAGES:
+      return None();
   }
 
   UNREACHABLE();
