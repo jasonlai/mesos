@@ -19,7 +19,9 @@
 
 #include <list>
 #include <map>
+#include <set>
 #include <string>
+#include <vector>
 
 #include <mesos/slave/container_logger.hpp>
 
@@ -37,7 +39,7 @@
 
 #include "slave/containerizer/containerizer.hpp"
 
-#include "slave/containerizer/mesos/isolators/gpu/nvidia.hpp"
+#include "slave/containerizer/mesos/isolators/gpu/components.hpp"
 
 namespace mesos {
 namespace internal {
@@ -75,7 +77,8 @@ public:
       const Flags& flags,
       Fetcher* fetcher,
       const process::Owned<mesos::slave::ContainerLogger>& logger,
-      process::Shared<Docker> docker);
+      process::Shared<Docker> docker,
+      const Option<NvidiaComponents>& nvidia = None());
 
   // This is only public for tests.
   DockerContainerizer(
@@ -124,11 +127,13 @@ public:
       const Flags& _flags,
       Fetcher* _fetcher,
       const process::Owned<mesos::slave::ContainerLogger>& _logger,
-      process::Shared<Docker> _docker)
+      process::Shared<Docker> _docker,
+      const Option<NvidiaComponents>& _nvidia)
     : flags(_flags),
       fetcher(_fetcher),
       logger(_logger),
       docker(_docker),
+      nvidia(_nvidia),
       pullTimer("containerizer/docker/pull", Hours(1))
   {
     process::metrics::add(pullTimer);
@@ -233,6 +238,11 @@ private:
       bool killed,
       const process::Future<Option<int>>& status);
 
+  void ____destroy(
+      const ContainerID& containerId,
+      bool killed,
+      const process::Future<Option<int>>& status);
+
   process::Future<Nothing> destroyTimeout(
       const ContainerID& containerId,
       process::Future<Nothing> future);
@@ -259,6 +269,35 @@ private:
     const Resources& current,
     const Resources& updated);
 
+#ifdef __linux__
+  // Allocate GPU resources for a specified container.
+  process::Future<Nothing> allocateNvidiaGpus(
+      const ContainerID& containerId,
+      const size_t count);
+
+  // Allocate a set of GPU resources for a specified container.
+  process::Future<Nothing> allocateNvidiaGpus(
+      const ContainerID& containerId,
+      const std::set<Gpu>& gpus);
+
+  process::Future<Nothing> _allocateNvidiaGpus(
+      const ContainerID& containerId,
+      const std::set<Gpu>& allocated);
+
+  // Deallocate GPU resources for a specified container.
+  process::Future<Nothing> deallocateNvidiaGpus(
+      const ContainerID& containerId);
+
+  process::Future<Nothing> _deallocateNvidiaGpus(
+      const ContainerID& containerId,
+      const std::set<Gpu>& deallocated);
+
+  // Recover nvidia devices during docker recovery.
+  process::Future<Nothing> recoverNvidiaDevices(
+      const ContainerID& containerId,
+      const std::string& containerName);
+#endif // __linux__
+
   Try<ResourceStatistics> cgroupsStatistics(pid_t pid) const;
 
   // Call back for when the executor exits. This will trigger
@@ -279,6 +318,8 @@ private:
   process::Shared<Docker> docker;
 
   process::metrics::Timer<Milliseconds> pullTimer;
+
+  Option<NvidiaComponents> nvidia;
 
   struct Container
   {
@@ -485,6 +526,14 @@ private:
     // container. This is stored so we can clean up the executor
     // on destroy.
     Option<pid_t> executorPid;
+
+#ifdef __linux__
+    // GPU resources allocated to the container.
+    std::set<Gpu> gpus;
+#endif // __linux__
+
+    // Devices attached to the container.
+    std::vector<Docker::Device> devices;
 
     // Marks if this container launches an executor in a docker
     // container.
