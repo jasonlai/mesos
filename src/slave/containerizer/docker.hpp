@@ -317,9 +317,9 @@ private:
 
   process::Shared<Docker> docker;
 
-  process::metrics::Timer<Milliseconds> pullTimer;
-
   Option<NvidiaComponents> nvidia;
+
+  process::metrics::Timer<Milliseconds> pullTimer;
 
   struct Container
   {

@@ -418,6 +418,31 @@ Future<string> Pipe::Reader::read()
 }
 
 
+Future<string> Pipe::Reader::readAll()
+{
+  std::shared_ptr<string> buffer(new string());
+
+  return _readAll(*this, buffer);
+}
+
+
+Future<string> Pipe::Reader::_readAll(
+    Pipe::Reader reader,
+    const std::shared_ptr<string>& buffer)
+{
+  return reader.read()
+    .then([reader, buffer](const string& read) -> Future<string> {
+      if (read.empty()) { // EOF.
+        return std::move(*buffer);
+      }
+
+      buffer->append(read);
+
+      return _readAll(reader, buffer);
+    });
+}
+
+
 bool Pipe::Reader::close()
 {
   bool closed = false;
@@ -551,6 +576,123 @@ bool Pipe::Writer::fail(const string& message)
 Future<Nothing> Pipe::Writer::readerClosed() const
 {
   return data->readerClosure.future();
+}
+
+
+namespace header {
+
+Try<WWWAuthenticate> WWWAuthenticate::create(const string& value)
+{
+  // Set `maxTokens` as 2 since auth-param quoted string may
+  // contain space (e.g., "Basic realm="Registry Realm").
+  vector<string> tokens = strings::tokenize(value, " ", 2);
+  if (tokens.size() != 2) {
+    return Error("Unexpected WWW-Authenticate header format: '" + value + "'");
+  }
+
+  hashmap<string, string> authParam;
+  foreach (const string& token, strings::split(tokens[1], ",")) {
+    vector<string> split = strings::split(token, "=");
+    if (split.size() != 2) {
+      return Error(
+          "Unexpected auth-param format: '" +
+          token + "' in '" + tokens[1] + "'");
+    }
+
+    // Auth-param values can be a quoted-string or directive values.
+    // Please see section "3.2.2.4 Directive values and quoted-string":
+    // https://tools.ietf.org/html/rfc2617.
+    authParam[split[0]] = strings::trim(split[1], strings::ANY, "\"");
+  }
+
+  // The realm directive (case-insensitive) is required for all
+  // authentication schemes that issue a challenge.
+  if (!authParam.contains("realm")) {
+    return Error(
+        "Unexpected auth-param '" +
+        tokens[1] + "': 'realm' is not defined");
+  }
+
+  return WWWAuthenticate(tokens[0], authParam);
+}
+
+
+string WWWAuthenticate::authScheme()
+{
+  return authScheme_;
+}
+
+
+hashmap<string, string> WWWAuthenticate::authParam()
+{
+  return authParam_;
+}
+
+} // namespace header {
+
+
+Headers& Headers::operator=(const Headers::Type& _headers)
+{
+  headers = _headers;
+  return *this;
+}
+
+
+string& Headers::operator[](const string& key)
+{
+  return headers[key];
+}
+
+
+void Headers::put(const string& key, const string& value)
+{
+  headers.put(key, value);
+}
+
+
+Option<string> Headers::get(const string& key) const
+{
+  if (headers.contains(key)) {
+    return headers.at(key);
+  }
+
+  return None();
+}
+
+
+string& Headers::at(const string& key)
+{
+  return headers.at(key);
+}
+
+
+const string& Headers::at(const string& key) const
+{
+  return headers.at(key);
+}
+
+
+bool Headers::contains(const string& key) const
+{
+  return headers.contains(key);
+}
+
+
+size_t Headers::size() const
+{
+  return headers.size();
+}
+
+
+bool Headers::empty() const
+{
+  return headers.empty();
+}
+
+
+void Headers::clear()
+{
+  headers.clear();
 }
 
 
@@ -841,7 +983,14 @@ ostream& operator<<(ostream& stream, const URL& url)
 
 namespace internal {
 
-string encode(const Request& request)
+void _encode(Pipe::Reader reader, Pipe::Writer writer); // Forward declaration.
+
+
+// Encodes the request by writing into a pipe, the caller can
+// read the encoded data from the returned read end of the pipe.
+// A pipe is used since the request body can be a pipe and must
+// be read asynchronously.
+Pipe::Reader encode(const Request& request)
 {
   // TODO(bmahler): Replace this with a RequestEncoder.
   std::ostringstream out;
@@ -890,8 +1039,18 @@ string encode(const Request& request)
     headers["Connection"] = "close";
   }
 
-  // Make sure the Content-Length is set correctly.
-  headers["Content-Length"] = stringify(request.body.length());
+  if (request.type == Request::PIPE) {
+    CHECK(!headers.contains("Content-Length"));
+
+    // Make sure the Transfer-Encoding header is set correctly
+    // for PIPE requests.
+    headers["Transfer-Encoding"] = "chunked";
+  } else {
+    CHECK_EQ(Request::BODY, request.type);
+
+    // Make sure the Content-Length header is set correctly.
+    headers["Content-Length"] = stringify(request.body.length());
+  }
 
   // TODO(bmahler): Use a 'Request' and a 'RequestEncoder' here!
   // Currently this does not handle 'gzip' content encoding,
@@ -906,62 +1065,74 @@ string encode(const Request& request)
   }
 
   out << "\r\n";
-  out << request.body;
 
-  return out.str();
+  Pipe pipe;
+  Pipe::Reader reader = pipe.reader();
+  Pipe::Writer writer = pipe.writer();
+
+  // Write the head of the request.
+  writer.write(out.str());
+
+  switch (request.type) {
+    case Request::BODY:
+      writer.write(request.body);
+      writer.close();
+      break;
+    case Request::PIPE:
+      CHECK_SOME(request.reader);
+      CHECK(request.body.empty());
+      _encode(request.reader.get(), writer);
+      break;
+  }
+
+  return reader;
 }
 
 
-// Forward declarations.
-Future<string> _convert(
-    Pipe::Reader reader,
-    const std::shared_ptr<string>& buffer,
-    const string& read);
-Response __convert(
-    const Response& pipeResponse,
-    const string& body);
+void _encode(Pipe::Reader reader, Pipe::Writer writer)
+{
+  reader.read()
+    .onAny([reader, writer](const Future<string>& chunk) mutable {
+      if (!chunk.isReady()) {
+        writer.fail(chunk.isFailed() ? chunk.failure() : "discarded");
+        return;
+      }
+
+      if (chunk->empty()) {
+        // EOF case.
+        writer.write("0\r\n\r\n");
+        writer.close();
+        return;
+      }
+
+      std::ostringstream out;
+      out << std::hex << chunk->size() << "\r\n";
+      out << chunk.get();
+      out << "\r\n";
+
+      writer.write(out.str());
+      _encode(reader, writer);
+    });
+}
 
 
 // Returns a 'BODY' response once the body of the provided
 // 'PIPE' response can be read completely.
 Future<Response> convert(const Response& pipeResponse)
 {
-  std::shared_ptr<string> buffer(new string());
-
   CHECK_EQ(Response::PIPE, pipeResponse.type);
   CHECK_SOME(pipeResponse.reader);
 
   Pipe::Reader reader = pipeResponse.reader.get();
 
-  return reader.read()
-    .then(lambda::bind(&_convert, reader, buffer, lambda::_1))
-    .then(lambda::bind(&__convert, pipeResponse, lambda::_1));
-}
-
-
-Future<string> _convert(
-    Pipe::Reader reader,
-    const std::shared_ptr<string>& buffer,
-    const string& read)
-{
-  if (read.empty()) { // EOF.
-    return *buffer;
-  }
-
-  buffer->append(read);
-
-  return reader.read()
-    .then(lambda::bind(&_convert, reader, buffer, lambda::_1));
-}
-
-
-Response __convert(const Response& pipeResponse, const string& body)
-{
-  Response bodyResponse = pipeResponse;
-  bodyResponse.type = Response::BODY;
-  bodyResponse.body = body;
-  bodyResponse.reader = None(); // Remove the reader.
-  return bodyResponse;
+  return reader.readAll()
+    .then([pipeResponse](const string& body) {
+      Response bodyResponse = pipeResponse;
+      bodyResponse.type = Response::BODY;
+      bodyResponse.body = body;
+      bodyResponse.reader = None(); // Remove the reader.
+      return bodyResponse;
+    });
 }
 
 
@@ -984,6 +1155,21 @@ public:
       return Failure("Cannot pipeline after 'Connection: close'");
     }
 
+    if (request.type == Request::PIPE) {
+      if (request.reader.isNone()) {
+        return Failure("Request reader must be set for PIPE request");
+      }
+
+      if (!request.body.empty()) {
+        return Failure("Request body must be empty for PIPE request");
+      }
+
+      Option<string> contentLength = request.headers.get("Content-Length");
+      if (request.headers.contains("Content-Length")) {
+        return Failure("'Content-Length' cannot be set for PIPE request");
+      }
+    }
+
     if (!request.keepAlive) {
       close = true;
     }
@@ -993,8 +1179,8 @@ public:
     Socket socket_ = socket;
 
     sendChain = sendChain
-      .then([socket_, request]() mutable {
-        return socket_.send(encode(request));
+      .then([socket_, request]() {
+        return _send(socket_, encode(request));
       });
 
     // If we can't write to the socket, disconnect.
@@ -1053,6 +1239,19 @@ protected:
   }
 
 private:
+  static Future<Nothing> _send(Socket socket, Pipe::Reader reader)
+  {
+    return reader.read()
+      .then([socket, reader](const string& data) mutable -> Future<Nothing> {
+        if (data.empty()) {
+          return Nothing(); // EOF.
+        }
+
+        return socket.send(data)
+          .then(lambda::bind(_send, socket, reader));
+      });
+  }
+
   void read()
   {
     socket.recv()

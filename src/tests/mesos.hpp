@@ -768,11 +768,11 @@ inline Resource createPersistentVolume(
 inline process::http::Headers createBasicAuthHeaders(
     const Credential& credential)
 {
-  return process::http::Headers{{
+  return process::http::Headers({{
       "Authorization",
       "Basic " +
         base64::encode(credential.principal() + ":" + credential.secret())
-  }};
+  }});
 }
 
 

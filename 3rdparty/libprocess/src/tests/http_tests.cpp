@@ -21,6 +21,7 @@
 #include <netinet/tcp.h>
 #endif // __WINDOWS__
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -86,6 +87,7 @@ public:
   MOCK_METHOD1(requestDelete, Future<http::Response>(const http::Request&));
   MOCK_METHOD1(a, Future<http::Response>(const http::Request&));
   MOCK_METHOD1(abc, Future<http::Response>(const http::Request&));
+  MOCK_METHOD1(requestStreaming, Future<http::Response>(const http::Request&));
 
   MOCK_METHOD2(
       authenticated,
@@ -103,6 +105,12 @@ protected:
     route("/a", None(), &HttpProcess::a);
     route("/a/b/c", None(), &HttpProcess::abc);
     route("/authenticated", "realm", None(), &HttpProcess::authenticated);
+
+    // Route accepting a streaming request.
+    RouteOptions options;
+    options.requestStreaming = true;
+
+    route("/requeststreaming", None(), &HttpProcess::requestStreaming, options);
   }
 };
 
@@ -392,6 +400,46 @@ TEST(HTTPTest, PipeFailure)
   // This should discard the associated future held by the write end.
   EXPECT_TRUE(reader.close());
   EXPECT_TRUE(writer.readerClosed().isDiscarded());
+}
+
+
+TEST(HTTPTest, PipeReadAll)
+{
+  {
+    http::Pipe pipe;
+    http::Pipe::Reader reader = pipe.reader();
+    http::Pipe::Writer writer = pipe.writer();
+
+    Future<string> readAll = reader.readAll();
+    EXPECT_TRUE(readAll.isPending());
+
+    // Close the writer after writing some data. This should result in
+    // a successful `readAll()` operation.
+    EXPECT_TRUE(writer.write("hello"));
+    EXPECT_TRUE(writer.write("world"));
+
+    EXPECT_TRUE(writer.close());
+
+    AWAIT_EXPECT_EQ("helloworld", readAll);
+  }
+
+  {
+    http::Pipe pipe;
+    http::Pipe::Reader reader = pipe.reader();
+    http::Pipe::Writer writer = pipe.writer();
+
+    Future<string> readAll = reader.readAll();
+    EXPECT_TRUE(readAll.isPending());
+
+    // Fail the writer after writing some data. This should result in
+    // a failed `readAll()` operation.
+    EXPECT_TRUE(writer.write("hello"));
+    EXPECT_TRUE(writer.write("world"));
+
+    EXPECT_TRUE(writer.fail("disconnected!"));
+
+    AWAIT_EXPECT_FAILED(readAll);
+  }
 }
 
 
@@ -792,6 +840,51 @@ TEST(HTTPTest, Request)
 }
 
 
+// This test verifies that the server can correctly receive the
+// uncompressed data from the request.
+TEST(HTTPConnectionTest, GzipRequestBody)
+{
+  Http http;
+
+  http::URL url = http::URL(
+      "http",
+      http.process->self().address.ip,
+      http.process->self().address.port,
+      http.process->self().id + "/body");
+
+  Future<http::Connection> connect = http::connect(url);
+  AWAIT_READY(connect);
+
+  http::Connection connection = connect.get();
+
+  Promise<http::Response> promise;
+  Future<http::Request> expected;
+
+  EXPECT_CALL(*http.process, body(_))
+    .WillOnce(DoAll(FutureArg<0>(&expected), Return(promise.future())));
+
+  string uncompressed = "Hello World";
+
+  http::Request request;
+  request.method = "POST";
+  request.url = url;
+  request.body = gzip::compress(uncompressed).get();
+  request.keepAlive = true;
+
+  request.headers["Content-Encoding"] = "gzip";
+  request.headers["Content-Length"] = request.body.length();
+
+  Future<http::Response> response = connection.send(request);
+
+  AWAIT_READY(expected);
+  EXPECT_EQ(uncompressed, expected->body);
+
+  // Disconnect.
+  AWAIT_READY(connection.disconnect());
+  AWAIT_READY(connection.disconnected());
+}
+
+
 TEST(HTTPConnectionTest, Serial)
 {
   Http http;
@@ -1135,6 +1228,71 @@ TEST(HTTPConnectionTest, Equality)
 }
 
 
+// This test verifies that we can stream the request body using the
+// connection abstraction to a streaming enabled route.
+TEST(HTTPConnectionTest, RequestStreaming)
+{
+  Http http;
+
+  http::URL url = http::URL(
+      "http",
+      http.process->self().address.ip,
+      http.process->self().address.port,
+      http.process->self().id + "/requeststreaming");
+
+  Future<http::Connection> connect = http::connect(url);
+  AWAIT_READY(connect);
+
+  http::Connection connection = connect.get();
+
+  Promise<http::Response> promise;
+  Future<http::Request> expected;
+
+  EXPECT_CALL(*http.process, requestStreaming(_))
+    .WillOnce(DoAll(FutureArg<0>(&expected), Return(promise.future())));
+
+  http::Pipe pipe;
+
+  http::Request request;
+  request.method = "POST";
+  request.url = url;
+  request.type = http::Request::PIPE;
+  request.reader = pipe.reader();
+  request.keepAlive = true;
+
+  Future<http::Response> response = connection.send(request);
+
+  AWAIT_READY(expected);
+  ASSERT_EQ(http::Request::PIPE, expected->type);
+  ASSERT_SOME(expected->reader);
+
+  http::Pipe::Reader reader = expected->reader.get();
+
+  // Start streaming the request body.
+  pipe.writer().write("Hello");
+
+  string read;
+  while (read != "Hello") {
+    Future<string> future = reader.read();
+    AWAIT_READY(future);
+
+    read.append(future.get());
+    ASSERT_TRUE(std::equal(read.begin(), read.end(), "Hello"));
+  }
+
+  pipe.writer().close();
+
+  promise.set(http::OK("1"));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+  EXPECT_EQ("1", response->body);
+
+  // Disconnect.
+  AWAIT_READY(connection.disconnect());
+  AWAIT_READY(connection.disconnected());
+}
+
+
 // TODO(hausdorff): This test seems to create inconsistent (though not
 // incorrect) results across platforms. Fix and enable the test on Windows. In
 // particular, the encoding in the 3rd example puts the first variable into the
@@ -1177,6 +1335,124 @@ TEST_TEMP_DISABLED_ON_WINDOWS(HTTPTest, QueryEncodeDecode)
 
   EXPECT_SOME_EQ(HashmapStringString({{"a&b=c", "d&e=fg"}}),
                  http::query::decode("a%26b%3Dc=d%26e%3Dfg"));
+}
+
+
+TEST_P(HTTPTest, Headers)
+{
+  http::Headers headers({
+    {"Content-Type", "application/json; charset=utf-8"},
+    {"Docker-Distribution-Api-Version", "registry/2.0"},
+    {"Www-Authenticate", "Basic realm=\"basic-realm\""},
+    {"Date", "Tue, 31 Jan 2017 13:48:24 GMT"}
+  });
+
+  EXPECT_EQ("application/json; charset=utf-8", headers["Content-Type"]);
+  EXPECT_EQ("registry/2.0", headers["Docker-Distribution-Api-Version"]);
+  EXPECT_EQ("Basic realm=\"basic-realm\"", headers["Www-Authenticate"]);
+  EXPECT_EQ("Tue, 31 Jan 2017 13:48:24 GMT", headers["Date"]);
+
+  EXPECT_SOME_EQ("application/json; charset=utf-8",
+                 headers.get("Content-Type"));
+
+  EXPECT_SOME_EQ("registry/2.0",
+                 headers.get("Docker-Distribution-Api-Version"));
+
+  EXPECT_SOME_EQ("Basic realm=\"basic-realm\"",
+                 headers.get("Www-Authenticate"));
+
+  EXPECT_SOME_EQ("Tue, 31 Jan 2017 13:48:24 GMT", headers.get("Date"));
+
+  EXPECT_EQ("application/json; charset=utf-8", headers.at("Content-Type"));
+  EXPECT_EQ("registry/2.0", headers.at("Docker-Distribution-Api-Version"));
+  EXPECT_EQ("Basic realm=\"basic-realm\"", headers.at("Www-Authenticate"));
+  EXPECT_EQ("Tue, 31 Jan 2017 13:48:24 GMT", headers.at("Date"));
+
+  EXPECT_TRUE(headers.contains("Content-Type"));
+  EXPECT_TRUE(headers.contains("Docker-Distribution-Api-Version"));
+  EXPECT_TRUE(headers.contains("Www-Authenticate"));
+  EXPECT_TRUE(headers.contains("Date"));
+  EXPECT_EQ(4u, headers.size());
+  EXPECT_FALSE(headers.empty());
+
+  headers.put("Date", "Wed, 1 Feb 2017 00:00:00 GMT");
+  headers.put("Content-Length", "87");
+
+  EXPECT_TRUE(headers.contains("Date"));
+  EXPECT_TRUE(headers.contains("Content-Length"));
+
+  EXPECT_EQ("Wed, 1 Feb 2017 00:00:00 GMT", headers["Date"]);
+  EXPECT_EQ("87", headers["Content-Length"]);
+
+  headers.clear();
+  EXPECT_EQ(0u, headers.size());
+  EXPECT_TRUE(headers.empty());
+}
+
+
+TEST_P(HTTPTest, WWWAuthenticateHeader)
+{
+  http::Headers headers;
+  headers["Www-Authenticate"] = "Basic realm=\"basic-realm\"";
+
+  Result<http::header::WWWAuthenticate> header =
+    headers.get<http::header::WWWAuthenticate>();
+
+  ASSERT_SOME(header);
+
+  EXPECT_EQ("Basic", header->authScheme());
+  EXPECT_EQ(1u, header->authParam().size());
+  EXPECT_EQ("basic-realm", header->authParam()["realm"]);
+
+  headers.clear();
+  header = headers.get<http::header::WWWAuthenticate>();
+
+  EXPECT_NONE(header);
+
+  headers["Www-Authenticate"] =
+    "Bearer realm=\"https://auth.docker.io/token\","
+    "service=\"registry.docker.io\","
+    "scope=\"repository:gilbertsong/inky:pull\"";
+
+  header = headers.get<http::header::WWWAuthenticate>();
+
+  ASSERT_SOME(header);
+
+  EXPECT_EQ("Bearer", header->authScheme());
+  EXPECT_EQ(3u, header->authParam().size());
+  EXPECT_EQ("https://auth.docker.io/token", header->authParam()["realm"]);
+  EXPECT_EQ("registry.docker.io", header->authParam()["service"]);
+  EXPECT_EQ("repository:gilbertsong/inky:pull", header->authParam()["scope"]);
+
+  headers["Www-Authenticate"] = "";
+  header = headers.get<http::header::WWWAuthenticate>();
+
+  EXPECT_ERROR(header);
+
+  headers["Www-Authenticate"] = " ";
+  header = headers.get<http::header::WWWAuthenticate>();
+
+  EXPECT_ERROR(header);
+
+  headers["Www-Authenticate"] = "Digest";
+  header = headers.get<http::header::WWWAuthenticate>();
+
+  EXPECT_ERROR(header);
+
+  headers["Www-Authenticate"] = "Digest =";
+  header = headers.get<http::header::WWWAuthenticate>();
+
+  EXPECT_ERROR(header);
+
+  headers["Www-Authenticate"] = "Digest ,,";
+  header = headers.get<http::header::WWWAuthenticate>();
+
+  EXPECT_ERROR(header);
+
+  headers["Www-Authenticate"] = "Digest uri=\"/dir/index.html\",qop=auth";
+  header = headers.get<http::header::WWWAuthenticate>();
+
+  EXPECT_ERROR(header);
 }
 
 
