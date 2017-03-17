@@ -117,6 +117,8 @@ public:
   virtual process::Future<Nothing> pruneImages(
       const std::vector<mesos::Image>& excludeImages);
 
+  virtual process::Future<Nothing> pull(const Image& image);
+
 private:
   explicit MesosContainerizer(
       const process::Owned<MesosContainerizerProcess>& process);
@@ -194,6 +196,8 @@ public:
 
   virtual process::Future<Nothing> pruneImages(
       const std::vector<mesos::Image>& excludeImages);
+
+  virtual process::Future<Nothing> pull(const Image& image);
 
 private:
   enum State

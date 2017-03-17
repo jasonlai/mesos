@@ -154,6 +154,21 @@ public:
 
   virtual process::Future<Nothing> pruneImages(
       const std::vector<mesos::Image>& excludeImages) = 0;
+
+  // Remove a nested container, including its sandbox and runtime directories.
+  //
+  // NOTE: You can only remove a a nested container that has been fully
+  // destroyed and whose parent has not been destroyed yet. If the parent has
+  // already been destroyed, then the sandbox and runtime directories will be
+  // eventually garbage collected. The caller is responsible for ensuring that
+  // `containerId` belongs to a nested container.
+  virtual process::Future<Nothing> remove(const ContainerID& containerId)
+  {
+    return process::Failure("Unsupported");
+  }
+
+  // Pull the container image into the store.
+  virtual process::Future<Nothing> pull(const Image& image);
 };
 
 } // namespace slave {

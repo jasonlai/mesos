@@ -313,6 +313,15 @@ Future<Nothing> Provisioner::pruneImages(const vector<Image>& activeImages) cons
 }
 
 
+Future<Nothing> Provisioner::pull(const Image& image) const
+{
+  return dispatch(
+      CHECK_NOTNULL(process.get()),
+      &ProvisionerProcess::pull,
+      image);
+}
+
+
 ProvisionerProcess::ProvisionerProcess(
     const string& _rootDir,
     const string& _defaultBackend,
@@ -641,6 +650,18 @@ Future<Nothing> ProvisionerProcess::pruneImages(
     .then(defer(self(), [=](const list<Nothing>&) {
       return Nothing();
     }));
+}
+
+
+Future<Nothing> ProvisionerProcess::pull(const Image& image)
+{
+  if (!stores.contains(image.type())) {
+    return Failure(
+        "Unsupported container image type: " + stringify(image.type()));
+  }
+
+  return stores.at(image.type())->get(image, defaultBackend)
+    .then([] { return Nothing(); });
 }
 
 

@@ -329,6 +329,11 @@ public:
     return Nothing();
   }
 
+  Future<Nothing> pull(const Image& image)
+  {
+    return Failure("Unsupported");
+  }
+
 private:
   struct ContainerData
   {
@@ -475,6 +480,9 @@ void TestContainerizer::setup()
 
   EXPECT_CALL(*this, pruneImages(_))
     .WillRepeatedly(Invoke(this, &TestContainerizer::_pruneImages));
+
+  EXPECT_CALL(*this, pull(_))
+    .WillRepeatedly(Invoke(this, &TestContainerizer::_pull));
 }
 
 
@@ -651,6 +659,16 @@ Future<Nothing> TestContainerizer::_pruneImages(
       process.get(),
       &TestContainerizerProcess::pruneImages,
       excludeImages);
+}
+
+
+Future<Nothing> TestContainerizer::_pull(
+    const Image& image)
+{
+  return process::dispatch(
+      process.get(),
+      &TestContainerizerProcess::pull,
+      image);
 }
 
 } // namespace tests {

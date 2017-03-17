@@ -56,16 +56,20 @@ using namespace process;
 
 using mesos::internal::master::Master;
 
+using mesos::internal::slave::Backend;
 using mesos::internal::slave::Fetcher;
 using mesos::internal::slave::FetcherProcess;
+using mesos::internal::slave::ImageInfo;
 using mesos::internal::slave::Launcher;
 using mesos::internal::slave::MesosContainerizer;
 using mesos::internal::slave::MesosContainerizerProcess;
 using mesos::internal::slave::MESOS_CONTAINERIZER;
 using mesos::internal::slave::PosixLauncher;
 using mesos::internal::slave::Provisioner;
+using mesos::internal::slave::ProvisionerProcess;
 using mesos::internal::slave::ProvisionInfo;
 using mesos::internal::slave::Slave;
+using mesos::internal::slave::Store;
 
 using mesos::internal::slave::state::ExecutorState;
 using mesos::internal::slave::state::FrameworkState;
@@ -1205,6 +1209,53 @@ TEST_F(MesosContainerizerProvisionerTest, IsolatorCleanupBeforePrepare)
   ContainerTermination termination = wait->get();
 
   EXPECT_FALSE(termination.has_status());
+}
+
+
+class MockStore : public Store
+{
+public:
+  MockStore() = default;
+
+  MOCK_METHOD0(recover, Future<Nothing>());
+
+  MOCK_METHOD2(get, Future<ImageInfo>(const Image&, const string&));
+};
+
+
+TEST_F(MesosContainerizerProvisionerTest, PullImage)
+{
+  slave::Flags flags = CreateSlaveFlags();
+  flags.launcher = "posix";
+
+  Fetcher fetcher;
+
+  Try<Launcher*> _launcher = PosixLauncher::create(flags);
+  ASSERT_SOME(_launcher);
+
+  Owned<Launcher> launcher(_launcher.get());
+
+  MockStore* store = new MockStore;
+
+  Owned<Provisioner> provisioner(new Provisioner(
+      Owned<ProvisionerProcess>(new ProvisionerProcess(
+          "", "copy", {{Image::DOCKER, Owned<Store>(store)}}, {}))));
+
+  Try<MesosContainerizer*> _containerizer = MesosContainerizer::create(
+      flags, true, &fetcher, launcher, provisioner.share(), {});
+
+  ASSERT_SOME(_containerizer);
+
+  Owned<MesosContainerizer> containerizer(_containerizer.get());
+
+  Image image;
+  image.set_type(Image::DOCKER);
+  image.mutable_docker()->set_name("alpine");
+
+  EXPECT_CALL(*store, get(_, _))
+    .WillOnce(Return(ImageInfo()));
+
+  AWAIT_READY(containerizer->pull(image));
 }
 
 

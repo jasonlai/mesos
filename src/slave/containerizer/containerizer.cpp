@@ -313,6 +313,11 @@ Try<Containerizer*> Containerizer::create(
   return containerizer.get();
 }
 
+Future<Nothing> Containerizer::pull(const Image& image)
+{
+  return Failure("Unsupported");
+}
+
 } // namespace slave {
 } // namespace internal {
 } // namespace mesos {

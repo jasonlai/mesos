@@ -602,6 +602,14 @@ Future<Nothing> MesosContainerizer::pruneImages(
 }
 
 
+Future<Nothing> MesosContainerizer::pull(const Image& image)
+{
+  return dispatch(process.get(),
+                  &MesosContainerizerProcess::pull,
+                  image);
+}
+
+
 Future<Nothing> MesosContainerizerProcess::recover(
     const Option<state::SlaveState>& state)
 {
@@ -2607,6 +2615,12 @@ Future<Nothing> MesosContainerizerProcess::pruneImages(
   // TODO(zhitao): call unique.
 
   return provisioner->pruneImages(activeImages);
+}
+
+
+Future<Nothing> MesosContainerizerProcess::pull(const Image& image)
+{
+  return provisioner->pull(image);
 }
 
 

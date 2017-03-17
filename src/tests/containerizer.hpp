@@ -136,6 +136,10 @@ public:
       pruneImages,
       process::Future<Nothing>(const std::vector<mesos::Image>& excludeImages));
 
+  MOCK_METHOD1(
+      pull,
+      process::Future<Nothing>(const Image&));
+
   // Additional destroy method for testing because we won't know the
   // ContainerID created for each container.
   process::Future<bool> destroy(
@@ -191,6 +195,9 @@ private:
 
   process::Future<Nothing> _pruneImages(
       const std::vector<mesos::Image>& excludeImages);
+
+  process::Future<Nothing> _pull(
+      const Image& image);
 
   process::Owned<TestContainerizerProcess> process;
 };

@@ -101,6 +101,9 @@ public:
   virtual process::Future<Nothing> pruneImages(
       const std::vector<Image>& activeImages) const;
 
+  // Pull the container image into the store.
+  virtual process::Future<Nothing> pull(const Image& image) const;
+
 protected:
   Provisioner() {} // For creating mock object.
 
@@ -133,6 +136,8 @@ public:
 
   process::Future<Nothing> pruneImages(
       const std::vector<Image>& activeImages);
+
+  process::Future<Nothing> pull(const Image& image);
 
 private:
   process::Future<ProvisionInfo> _provision(
