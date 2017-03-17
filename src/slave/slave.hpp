@@ -692,6 +692,10 @@ private:
         const RequestMediaTypes& mediaTypes,
         const Option<std::string>& principal) const;
 
+    process::Future<process::http::Response> pullContainerImage(
+        const mesos::agent::Call& call,
+        const RequestMediaTypes& mediaTypes,
+        const Option<std::string>& principal) const;
 
     Slave* slave;
 

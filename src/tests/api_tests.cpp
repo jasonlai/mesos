@@ -94,9 +94,11 @@ using std::tuple;
 using std::vector;
 
 using testing::_;
+using testing::AllOf;
 using testing::AtMost;
 using testing::DoAll;
 using testing::Eq;
+using testing::Property;
 using testing::Return;
 using testing::WithParamInterface;
 
@@ -4762,6 +4764,61 @@ TEST_P(AgentAPITest, DefaultAccept)
 
   AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
   AWAIT_EXPECT_RESPONSE_HEADER_EQ(APPLICATION_JSON, "Content-Type", response);
+}
+
+
+TEST_P(AgentAPITest, PullContainerImage)
+{
+  Future<Nothing> __recover = FUTURE_DISPATCH(_, &Slave::__recover);
+
+  TestContainerizer containerizer;
+
+  slave::Flags flags = CreateSlaveFlags();
+
+  StandaloneMasterDetector detector;
+  Try<Owned<cluster::Slave>> slave = this->StartSlave(
+      &detector, &containerizer, flags);
+
+  ASSERT_SOME(slave);
+
+  AWAIT_READY(__recover);
+
+  // Wait until the agent has finished recovery.
+  Clock::pause();
+  Clock::settle();
+
+  // TODO(ipronin): Consider adding a protobuf matcher if such check
+  // is needed somewhere else.
+  EXPECT_CALL(
+      containerizer,
+      pull(AllOf(
+          Property(&Image::type, Image::DOCKER),
+          Property(&Image::has_docker, true),
+          Property(&Image::docker, Property(&Image::Docker::name, "alpine")))))
+    .WillOnce(Return(Nothing()));
+
+  mesos::v1::Image image;
+  image.set_type(mesos::v1::Image::DOCKER);
+  image.mutable_docker()->set_name("alpine");
+
+  v1::agent::Call call;
+  call.set_type(v1::agent::Call::PULL_CONTAINER_IMAGE);
+  call.mutable_pull_container_image()->mutable_image()->CopyFrom(image);
+
+  ContentType contentType = GetParam();
+  http::Headers headers = createBasicAuthHeaders(DEFAULT_CREDENTIAL);
+  headers["Accept"] = stringify(contentType);
+
+  Future<http::Response> response = http::post(
+      slave.get()->pid,
+      "api/v1",
+      headers,
+      serialize(contentType, call),
+      stringify(contentType));
+
+  AWAIT_EXPECT_RESPONSE_STATUS_EQ(http::OK().status, response);
+
+  Clock::resume();
 }
 
 

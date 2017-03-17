@@ -308,6 +308,30 @@ Option<Error> validate(
 
     case mesos::agent::Call::PRUNE_IMAGES:
       return None();
+
+    case mesos::agent::Call::PULL_CONTAINER_IMAGE: {
+      if (!call.has_pull_container_image()) {
+        return Error("Expecting 'pull_container_iamge' to be present");
+      }
+
+      switch (call.pull_container_image().image().type()) {
+        case Image::DOCKER:
+          if (!call.pull_container_image().image().has_docker()) {
+            return Error(
+                "Expecting 'pull_container_image.image.docker' to be present");
+          }
+          break;
+
+        case Image::APPC:
+          if (!call.pull_container_image().image().has_appc()) {
+            return Error(
+                "Expecting 'pull_container_image.image.appc' to be present");
+          }
+          break;
+      }
+
+      return None();
+    }
   }
 
   UNREACHABLE();

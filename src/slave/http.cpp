@@ -585,6 +585,9 @@ Future<Response> Slave::Http::_api(
 
     case mesos::agent::Call::PRUNE_IMAGES:
       return pruneImages(call, mediaTypes, principal);
+
+    case mesos::agent::Call::PULL_CONTAINER_IMAGE:
+      return pullContainerImage(call, mediaTypes, principal);
   }
 
   UNREACHABLE();
@@ -2920,6 +2923,21 @@ Future<Response> Slave::Http::attachContainerOutput(
 
       return _attachContainerOutput(call, mediaTypes);
   }));
+}
+
+
+Future<Response> Slave::Http::pullContainerImage(
+    const mesos::agent::Call& call,
+    const RequestMediaTypes& mediaTypes,
+    const Option<string>& principal) const
+{
+  CHECK_EQ(mesos::agent::Call::PULL_CONTAINER_IMAGE, call.type());
+  CHECK(call.has_pull_container_image());
+
+  const Image& image = call.pull_container_image().image();
+
+  return slave->containerizer->pull(image)
+    .then([]() -> Response { return OK(); });
 }
 
 } // namespace slave {

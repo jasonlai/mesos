@@ -67,6 +67,7 @@ message Call {
     ATTACH_CONTAINER_OUTPUT = 19; // see 'AttachContainerOutput' below.
 
     PRUNE_IMAGES = 20; // See 'PruneImages' below.
+    PULL_CONTAINER_IMAGE = 22; // See 'PullContainerImage' below.
   }
 
   // Provides a snapshot of the current metrics tracked by the agent.
@@ -170,6 +171,11 @@ message Call {
     repeated Image exclude_images = 1;
   }
 
+  // Pull the container image into the provisioner store.
+  message PullContainerImage {
+    required Image image = 1;
+  }
+
   optional Type type = 1;
 
   optional GetMetrics get_metrics = 2;
@@ -183,6 +189,7 @@ message Call {
   optional AttachContainerInput attach_container_input = 10;
   optional AttachContainerOutput attach_container_output = 11;
   optional PruneImages prune_images = 12;
+  optional PullContainerImage pull_container_image = 13;
 }
 
 
