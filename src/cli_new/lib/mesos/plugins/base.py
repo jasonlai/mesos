@@ -40,7 +40,7 @@ Usage:
   mesos {plugin} (-h | --help)
   mesos {plugin} --version
   mesos {plugin} <command> (-h | --help)
-  mesos {plugin} <command> [<args>...] [options]
+  mesos {plugin} <command> [options] [<args>...]
 
 Options:
   -h --help  Show this screen.
@@ -56,7 +56,7 @@ SUBCOMMAND_USAGE = \
 Usage:
   mesos {plugin} {command} (-h | --help)
   mesos {plugin} {command} --version
-  mesos {plugin} {command} {arguments} [options]
+  mesos {plugin} {command} [options] {arguments}
 
 Options:
 {flags}
@@ -98,6 +98,16 @@ class PluginBase(object):
             self.SHORT_HELP = getattr(module, "SHORT_HELP")
         if hasattr(module, "USAGE"):
             self.USAGE = getattr(module, "USAGE")
+
+        config_vars = {
+            "agent_ip" : config.AGENT_IP,
+            "agent_port" : config.AGENT_PORT
+        }
+
+        for command in self.COMMANDS:
+            for flag in self.COMMANDS[command]["flags"]:
+                self.COMMANDS[command]["flags"][flag] = \
+                    self.COMMANDS[command]["flags"][flag].format(**config_vars)
 
         self.config = config
 
@@ -169,6 +179,9 @@ class PluginBase(object):
                     program="mesos " + self.PLUGIN_NAME + " " + cmd,
                     version=self.VERSION,
                     options_first=True)
+
+            if "alias" in self.COMMANDS[cmd]:
+                cmd = self.COMMANDS[cmd]["alias"]
 
             self.__setup__(cmd, argv)
             getattr(self, cmd.replace("-", "_"))(arguments)

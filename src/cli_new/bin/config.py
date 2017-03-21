@@ -38,8 +38,21 @@ except Exception:
     VERSION = "Development"
 
 
+# The top-level directory of this project.
+PROJECT_DIR = os.path.join(os.path.dirname(__file__), os.pardir)
+
+
 # The builtin plugins.
-PLUGINS = []
+PLUGINS = [
+    os.path.join(PROJECT_DIR, "lib/mesos/plugins", "container"),
+    os.path.join(PROJECT_DIR, "lib/mesos/plugins", "config"),
+    os.path.join(PROJECT_DIR, "lib/mesos/plugins", "task"),
+]
+
+
+# Default agent parameters.
+AGENT_IP = "127.0.0.1"
+AGENT_PORT = "5051"
 
 
 # Allow extra plugins to be pulled in from a configuration file.
@@ -57,11 +70,19 @@ if os.environ.get("MESOS_CLI_CONFIG_FILE"):
         raise CLIException("Error loading config file as JSON: {error}"
                            .format(error=exception))
 
-    if "plugins" in CONFIG_DATA:
-        if not isinstance(CONFIG_DATA["plugins"], list):
-            raise CLIException("'plugins' field must be a list")
+    for config_key in CONFIG_DATA.keys():
+        config_key_upper = config_key.upper()
 
-        PLUGINS.extend(CONFIG_DATA["plugins"])
+        if config_key_upper in globals():
+            config_key_type = globals()[config_key_upper]
+
+            if not isinstance(CONFIG_DATA[config_key], config_key_type):
+                raise CLIException("'{key}' field must be a {type}"
+                                   .format(key=config_key,
+                                           type=config_key_type))
+        else:
+            raise CLIException("Unknown key in CONFIG_FILE '{key}':"
+                               .format(key=config_key))
 
 
 # Allow extra plugins to be pulled in from the environment.

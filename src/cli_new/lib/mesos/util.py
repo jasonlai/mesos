@@ -18,12 +18,48 @@
 A collection of helper functions used by the CLI and its Plugins.
 """
 
+import contextlib
+import functools
 import imp
 import importlib
+import json
+import logging
 import os
+import platform
+import re
+import stat
+import sys
+import time
 import textwrap
 
-from mesos.exceptions import CLIException
+import concurrent.futures
+import jsonschema
+import netifaces
+import six
+
+from mesos.exceptions import (
+    CLIException,
+    MesosException,
+    MesosIOException,
+)
+
+
+STREAM_CONCURRENCY = 20
+
+
+def get_logger(name):
+    """Get a logger
+
+    :param name: The name of the logger. E.g. __name__
+    :type name: str
+    :returns: The logger for the specified name
+    :rtype: logging.Logger
+    """
+
+    return logging.getLogger(name)
+
+
+LOGGER = get_logger(__name__)
 
 
 def import_modules(package_paths, module_type):
@@ -140,6 +176,7 @@ def format_subcommands_help(cmd):
     long_help = "  " + "\n  ".join(long_help.split('\n'))
     flags = cmd["flags"]
     flags["-h --help"] = "Show this screen."
+    flags["--version"] = "Show version info."
     flag_string = ""
 
     if len(flags.keys()) != 0:
@@ -148,4 +185,350 @@ def format_subcommands_help(cmd):
             num_spaces = len(longest_flag_name) - len(flag) + 2
             flag_string += "  %s%s%s\n" % (flag, " " * num_spaces, flags[flag])
 
-    return (arguments, short_help, long_help, flag_string)
+        flag_string = flag_string.rstrip()
+
+    return arguments, short_help, long_help, flag_string
+
+
+def verify_root():
+    """
+    Verify that this command is being executed by the root user.
+    """
+    if os.geteuid() != 0:
+        raise CLIException("Unable to run command as non-root user:"
+                           " Consider running with 'sudo'")
+
+
+def verify_linux():
+    """
+    Verify that this command is being executed on a Linux machine.
+    """
+    if sys.platform != "linux2":
+        raise CLIException("Unable to run command on non-linux system")
+
+
+def is_local(addr):
+    """
+    Checks if the agent address is local to the current machine or not.
+    """
+    try:
+        localhosts = []
+        for interface in netifaces.interfaces():
+            if netifaces.AF_INET in netifaces.ifaddresses(interface):
+                for link in netifaces.ifaddresses(interface)[netifaces.AF_INET]:
+                    localhosts.append(link["addr"])
+    except Exception as exception:
+        raise CLIException("Failed to determine list of localhost ips: {error}"
+                           .format(error=exception))
+
+    try:
+        ip, _ = addr.rsplit(":", 1)
+    except Exception as exception:
+        raise CLIException("Could not split ip/port from '{addr}': {error}"
+                           .format(addr=addr, error=exception))
+
+    if ip in localhosts:
+        return True
+
+    return False
+
+
+class Table(object):
+    """ Defines a custom table structure for printing to the terminal. """
+
+    def __init__(self, columns):
+        """
+        Initialize a table with a list of column names
+        to act as headers for each column in the table.
+        """
+        if not isinstance(columns, list):
+            raise CLIException("Column headers must be supplied as a list")
+
+        for column in columns:
+            if re.search(r"(\s)\1{2,}", column):
+                raise CLIException("Column headers cannot have more"
+                                   " than one space between words")
+
+        self.table = [columns]
+        self.padding = [len(column) for column in columns]
+
+    def __getitem__(self, index):
+        return list(self.table[index])
+
+    def dimensions(self):
+        """
+        Returns the dimensions of the table as (<num-rows>, <num-columns>).
+        """
+        return len(self.table), len(self.table[0])
+
+    def add_row(self, row):
+        """
+        Add a row to the table. Input must be a list where each entry
+        corresponds to its respective column in order.
+        """
+        if len(row) != len(self.table[0]):
+            raise CLIException("Number of entries and columns do no match!")
+
+        # Adjust padding for each column
+        for index, elem in enumerate(row):
+            if len(elem) > self.padding[index]:
+                self.padding[index] = len(elem)
+
+        self.table.append(row)
+
+    def __str__(self):
+        """
+        Convert a table to string for printing.
+        """
+        table_string = ""
+        for r_index, row in enumerate(self.table):
+            for index, entry in enumerate(row):
+                table_string += "%s%s" % \
+                        (entry, " " * (self.padding[index] - len(entry) + 2))
+
+            if r_index != len(self.table) - 1:
+                table_string += "\n"
+
+        return table_string
+
+    @staticmethod
+    def parse(string):
+        """
+        Parse a string previously printed as a `Table` back into a `Table`.
+        """
+        lines = string.split("\n")
+
+        # Find the location and contents of column headers in the string.
+        # Assume only single spaces between words in column headers.
+        matches = re.finditer(r"([\w\d]+\s?[\w\d]+)+", lines[0])
+        columns = [(m.start(), m.group()) for m in matches]
+
+        # Build a table from the column header contents.
+        table = Table([c[1] for c in columns])
+
+        # Fill in the subsequent rows.
+        for line in lines[1:]:
+            row = []
+            start_indices = [c[0] for c in columns]
+
+            for i, start_index in enumerate(start_indices):
+                if i + 1 < len(start_indices):
+                    column = line[start_index:start_indices[i + 1]]
+                else:
+                    column = line[start_index:]
+
+                row.append(str(column.strip()))
+
+            table.add_row(row)
+
+        return table
+
+
+def duration(func):
+    """ Decorator to log the duration of a function.
+
+    :param func: function to measure
+    :type func: function
+    :returns: wrapper function
+    :rtype: function
+    """
+
+    @functools.wraps(func)
+    def timer(*args, **kwargs):
+        """timer calculates and prints the duration of fnc"""
+        start = time.time()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            LOGGER.debug("duration: %s.%s: %2.2fs",
+                         func.__module__,
+                         func.__name__,
+                         time.time() - start)
+
+    return timer
+
+
+def ensure_dir_exists(directory):
+    """If `directory` does not exist, create it.
+
+    :param directory: path to the directory
+    :type directory: string
+    :rtype: None
+    """
+
+    if not os.path.exists(directory):
+        LOGGER.info('Creating directory: %r', directory)
+
+        try:
+            os.makedirs(directory, 0o775)
+        except os.error as err:
+            raise MesosException(
+                'Cannot create directory [{}]: {}'.format(directory, err))
+
+
+def ensure_file_exists(path):
+    """ Create file if it doesn't exist
+
+    :param path: path of file to create
+    :type path: str
+    :rtype: None
+    """
+
+    if not os.path.exists(path):
+        try:
+            open(path, 'w').close()
+            os.chmod(path, 0o600)
+        except IOError as err:
+            raise MesosException(
+                'Cannot create file [{}]: {}'.format(path, err))
+
+
+def enforce_file_permissions(path):
+    """Enforce 400 or 600 permissions on file
+
+    :param path: Path to the TOML file
+    :type path: str
+    :rtype: None
+    """
+
+    if not os.path.isfile(path):
+        raise MesosException('Path [{}] is not a file'.format(path))
+
+    # Unix permissions are incompatible with windows
+    # TODO: https://github.com/dcos/dcos-cli/issues/662
+    if sys.platform == 'win32':
+        return
+
+    permissions = oct(stat.S_IMODE(os.lstat(path).st_mode))
+    if permissions not in ['0o600', '0600', '0o400', '0400']:
+        msg = (
+            "Permissions '{}' for configuration file '{}' are too open. "
+            "File must only be accessible by owner. "
+            "Aborting...".format(permissions, path))
+        raise MesosException(msg)
+
+
+@contextlib.contextmanager
+def open_file(path, *args, **kwargs):
+    """Context manager that opens a file, and raises a DCOSException if
+    it fails.
+
+    :param path: file path
+    :type path: str
+    :param *args: other arguments to pass to `open`
+    :type *args: [str]
+    :returns: a context manager
+    :rtype: context manager
+    """
+
+    try:
+        with open(path, *args, **kwargs) as file_:
+            yield file_
+    except IOError as err:
+        LOGGER.exception('Unable to open file: %s', path)
+        raise MesosIOException(path, err.errno)
+
+
+def validate_json(instance, schema):
+    """Validate an instance under the given schema.
+
+    :param instance: the instance to validate
+    :type instance: dict
+    :param schema: the schema to validate with
+    :type schema: dict
+    :returns: list of errors as strings
+    :rtype: [str]
+    """
+
+    def sort_key(validation_error):
+        """Key for sorting validation errors"""
+        return validation_error.message
+
+    validator = jsonschema.Draft4Validator(schema)
+    validation_errors = list(validator.iter_errors(instance))
+    validation_errors = sorted(validation_errors, key=sort_key)
+
+    return [_format_validation_error(e) for e in validation_errors]
+
+
+def _format_validation_error(error):
+    """
+    :param error: validation error to format
+    :type error: jsonchema.exceptions.ValidationError
+    :returns: string representation of the validation error
+    :rtype: str
+    """
+
+    match = re.search("(.+) is a required property", error.message)
+    if match:
+        message = 'Error: missing required property {}.'.format(
+            match.group(1))
+    else:
+        message = 'Error: {}\n'.format(error.message)
+        if len(error.absolute_path) > 0:
+            message += 'Path: {}\n'.format('.'.join(
+                [six.text_type(path)
+                 for path in error.absolute_path]))
+        message += 'Value: {}'.format(json.dumps(error.instance))
+
+    return message
+
+
+def list_to_err(errs):
+    """convert list of error strings to a single string
+
+    :param errs: list of string errors
+    :type errs: [str]
+    :returns: error message
+    :rtype: str
+    """
+
+    return str.join('\n\n', errs)
+
+
+def is_windows_platform():
+    """
+    :returns: True is program is running on Windows platform, False
+     in other case
+    :rtype: boolean
+    """
+
+    return platform.system() == "Windows"
+
+
+def parse_int(string):
+    """Parse string and an integer
+
+    :param string: string to parse as an integer
+    :type string: str
+    :returns: the interger value of the string
+    :rtype: int
+    """
+
+    try:
+        return int(string)
+    except:
+        LOGGER.error(
+            'Unhandled exception while parsing string as int: %r',
+            string)
+
+        raise MesosException('Error parsing string as int')
+
+
+def stream(func, objs):
+    """Apply `fn` to `objs` in parallel, yielding the (Future, obj) for
+    each as it completes.
+
+    :param func: function
+    :type func: function
+    :param objs: objs
+    :type objs: objs
+    :returns: iterator over (Future, typeof(obj))
+    :rtype: iterator over (Future, typeof(obj))
+
+    """
+
+    with concurrent.futures.ThreadPoolExecutor(STREAM_CONCURRENCY) as pool:
+        jobs = {pool.submit(func, obj): obj for obj in objs}
+        for job in concurrent.futures.as_completed(jobs):
+            yield job, jobs[job]
