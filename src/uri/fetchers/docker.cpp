@@ -306,6 +306,8 @@ private:
       const URI& uri,
       const string& directory,
       const URI& manifestUri,
+      const http::Headers& manifestHeaders,
+      const http::Headers& authHeaders,
       const http::Response& response);
 
   Future<Nothing> __fetch(
@@ -412,6 +414,22 @@ Future<Nothing> DockerFetcherPlugin::fetch(
 }
 
 
+static http::Headers getAuthHeaderBasic(
+    const Option<string>& credential)
+{
+  http::Headers headers;
+
+  if (credential.isSome()) {
+    // NOTE: The 'Basic' credential would be attached as a header
+    // when pulling a public image from a registry, if the host
+    // of the image's repository exists in the docker config file.
+    headers["Authorization"] = "Basic " + credential.get();
+  }
+
+  return headers;
+}
+
+
 Future<Nothing> DockerFetcherPluginProcess::fetch(
     const URI& uri,
     const string& directory)
@@ -440,18 +458,42 @@ Future<Nothing> DockerFetcherPluginProcess::fetch(
         directory + "': " + mkdir.error());
   }
 
+  // Prepare the authorization header for fetching the manifest and
+  // blobs from the docker config file. Leave it empty if there is none.
+  http::Headers authHeaders;
+  const string registry = uri.has_port()
+    ? uri.host() + ":" + stringify(uri.port())
+    : uri.host();
+  foreachpair (const string& key, const spec::Config::Auth& value, auths) {
+    if (registry == spec::parseAuthUrl(key) && value.has_auth()) {
+      authHeaders = getAuthHeaderBasic(value.auth());
+      break;
+    }
+  }
+
   if (uri.scheme() == "docker-blob") {
-    return fetchBlob(uri, directory, http::Headers());
+    return fetchBlob(uri, directory, authHeaders);
   }
 
   URI manifestUri = getManifestUri(uri);
 
-  return curl(manifestUri)
+  // Request a Version 2 Schema 1 manifest. The MIME type of a Schema 1
+  // manifest is described in the following link:
+  // https://docs.docker.com/registry/spec/manifest-v2-1/
+  // Note: The 'Accept' header is required for Amazon ECR. See:
+  // https://forums.aws.amazon.com/message.jspa?messageID=780440
+  http::Headers manifestHeaders = {
+    {"Accept", "application/vnd.docker.distribution.manifest.v1+json"}
+  };
+
+  return curl(manifestUri, manifestHeaders + authHeaders)
     .then(defer(self(),
                 &Self::_fetch,
                 uri,
                 directory,
                 manifestUri,
+                manifestHeaders,
+                authHeaders,
                 lambda::_1));
 }
 
@@ -460,13 +502,15 @@ Future<Nothing> DockerFetcherPluginProcess::_fetch(
     const URI& uri,
     const string& directory,
     const URI& manifestUri,
+    const http::Headers& manifestHeaders,
+    const http::Headers& authHeaders,
     const http::Response& response)
 {
   if (response.code == http::Status::UNAUTHORIZED) {
     return getAuthHeader(manifestUri, response)
       .then(defer(self(), [=](
           const http::Headers& authHeaders) -> Future<Nothing> {
-        return curl(manifestUri, authHeaders)
+        return curl(manifestUri, manifestHeaders + authHeaders)
           .then(defer(self(),
                       &Self::__fetch,
                       uri,
@@ -476,7 +520,7 @@ Future<Nothing> DockerFetcherPluginProcess::_fetch(
       }));
   }
 
-  return __fetch(uri, directory, http::Headers(), response);
+  return __fetch(uri, directory, authHeaders, response);
 }
 
 
@@ -609,22 +653,6 @@ Future<Nothing> DockerFetcherPluginProcess::_fetchBlob(
 }
 
 
-static http::Headers getAuthHeaderBasic(
-    const Option<string>& credential)
-{
-  http::Headers headers;
-
-  if (credential.isSome()) {
-    // NOTE: The 'Basic' credential would be attached as a header
-    // when pulling a public image from a registry, if the host
-    // of the image's repository exists in the docker config file.
-    headers["Authorization"] = "Basic " + credential.get();
-  }
-
-  return headers;
-}
-
-
 static http::Headers getAuthHeaderBearer(
     const Option<string>& authToken)
 {
@@ -654,24 +682,6 @@ Future<http::Headers> DockerFetcherPluginProcess::getAuthHeader(
 
   // According to RFC, auth scheme should be case insensitive.
   const string authScheme = strings::upper(header->authScheme());
-
-  // If a '401 Unauthorized' response is received and the auth-scheme
-  // is 'Basic', we do basic authentication with the server directly.
-  if (authScheme == "BASIC") {
-    const string registry = uri.has_port()
-      ? uri.host() + ":" + stringify(uri.port())
-      : uri.host();
-
-    Option<string> auth;
-    foreachpair (const string& key, const spec::Config::Auth& value, auths) {
-      if (registry == spec::parseAuthUrl(key) && value.has_auth()) {
-        auth = value.auth();
-        break;
-      }
-    }
-
-    return getAuthHeaderBasic(auth);
-  }
 
   // If a '401 Unauthorized' response is received and the auth-scheme
   // is 'Bearer', we expect a header 'Www-Authenticate' containing the
