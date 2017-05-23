@@ -120,6 +120,10 @@ using std::string;
 using std::vector;
 
 
+void abortInsteadOfExit() {
+  std::cerr << "Calling abort() instead of exit(1)" << std::endl;
+  abort();
+}
 
 int main(int argc, char** argv)
 {
@@ -288,6 +292,10 @@ int main(int argc, char** argv)
   // Log any flag warnings (after logging is initialized).
   foreach (const flags::Warning& warning, load->warnings) {
     LOG(WARNING) << warning.message;
+  }
+
+  if (os::getenv("UBER_MESOS_ABORT_INSTEAD_OF_EXIT_ON_FATAL").isSome()) {
+    google::InstallFailureFunction(&abortInsteadOfExit);
   }
 
   spawn(new VersionProcess(), true);
