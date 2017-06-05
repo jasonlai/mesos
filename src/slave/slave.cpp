@@ -4914,8 +4914,16 @@ void Slave::removeExecutor(Framework* framework, Executor* executor)
     const string path = paths::getExecutorPath(
         flags.work_dir, info.id(), framework->id(), executor->id);
 
+    // Make sure we detach the "latest" symlink.
+    const string latestPath = paths::getExecutorLatestRunPath(
+        flags.work_dir,
+        info.id(),
+        framework->id(),
+        executor->id);
+
     os::utime(path); // Update the modification time.
-    garbageCollect(path);
+    garbageCollect(path)
+      .then(defer(self(), &Self::detachFile, latestPath));
   }
 
   if (executor->checkpoint) {
@@ -6496,6 +6504,18 @@ Executor* Framework::launchExecutor(
           executorId);
     };
 
+  // Attach the "latest" symlink. This allows for frameworks to
+  // easily construct paths to the sandbox directory for a given task
+  // without having to know the container id.
+  string latestPath = paths::getExecutorLatestRunPath(
+      slave->flags.work_dir,
+      slave->info.id(),
+      id(),
+      executorInfo.executor_id());
+
+  slave->files->attach(executor->directory, latestPath, authorize)
+    .onAny(defer(slave, &Slave::fileAttached, lambda::_1, executor->directory));
+
   slave->files->attach(executor->directory, executor->directory, authorize)
     .onAny(defer(slave, &Slave::fileAttached, lambda::_1, executor->directory));
 
@@ -6758,6 +6778,18 @@ void Framework::recoverExecutor(const ExecutorState& state)
           executorId);
     };
 
+  // Attach the "latest" symlink. This allows for frameworks to
+  // easily construct paths to the sandbox directory for a given task
+  // without having to know the container id.
+  string latestPath = paths::getExecutorLatestRunPath(
+      slave->flags.work_dir,
+      slave->info.id(),
+      id(),
+      state.id);
+
+  slave->files->attach(executor->directory, latestPath, authorize)
+    .onAny(defer(slave, &Slave::fileAttached, lambda::_1, executor->directory));
+
   // Expose the executor's files.
   slave->files->attach(executor->directory, executor->directory, authorize)
     .onAny(defer(slave, &Slave::fileAttached, lambda::_1, executor->directory));
@@ -6789,7 +6821,8 @@ void Framework::recoverExecutor(const ExecutorState& state)
 
     // GC the top level executor work directory.
     slave->garbageCollect(paths::getExecutorPath(
-        slave->flags.work_dir, slave->info.id(), id(), state.id));
+        slave->flags.work_dir, slave->info.id(), id(), state.id))
+        .then(defer(slave, &Slave::detachFile, latestPath));
 
     // GC the top level executor meta directory.
     slave->garbageCollect(paths::getExecutorPath(
