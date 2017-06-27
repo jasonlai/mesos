@@ -859,6 +859,9 @@ public:
                          const Image&));
 
   MOCK_CONST_METHOD1(destroy, Future<bool>(const ContainerID&));
+
+  MOCK_CONST_METHOD1(pruneImages,
+                     Future<Nothing>(const vector<Image>& activeImages));
 };
 
 
@@ -1119,6 +1122,113 @@ TEST_F(MesosContainerizerProvisionerTest, IsolatorCleanupBeforePrepare)
   AWAIT_READY(provision);
 
   containerizer->destroy(containerId);
+
+  ASSERT_TRUE(wait.isPending());
+  promise.set(ProvisionInfo{"rootfs", None()});
+
+  AWAIT_FAILED(launch);
+  AWAIT_READY(wait);
+  ASSERT_SOME(wait.get());
+
+  ContainerTermination termination = wait->get();
+
+  EXPECT_FALSE(termination.has_status());
+}
+
+
+// This test verifies that pruneImages passes down image references
+// for active containers.
+TEST_F(MesosContainerizerProvisionerTest, PruneImages)
+{
+  slave::Flags flags = CreateSlaveFlags();
+  flags.launcher = "posix";
+
+  Try<Launcher*> launcher_ = SubprocessLauncher::create(flags);
+  ASSERT_SOME(launcher_);
+
+  Owned<Launcher> launcher(new TestLauncher(Owned<Launcher>(launcher_.get())));
+
+  MockProvisioner* provisioner = new MockProvisioner();
+
+  Future<Nothing> provision;
+  Promise<ProvisionInfo> promise;
+
+  EXPECT_CALL(*provisioner, provision(_, _))
+    .WillOnce(DoAll(FutureSatisfy(&provision),
+                    Return(promise.future())));
+
+  EXPECT_CALL(*provisioner, destroy(_))
+    .WillOnce(Return(true));
+
+  Future<vector<Image>> activeImages;
+
+  EXPECT_CALL(*provisioner, pruneImages(_))
+    .WillOnce(DoAll(FutureArg<0>(&activeImages),
+                    Return(Nothing())));
+
+  Fetcher fetcher(flags);
+
+  Try<MesosContainerizer*> _containerizer = MesosContainerizer::create(
+      flags,
+      true,
+      &fetcher,
+      launcher,
+      Shared<Provisioner>(provisioner),
+      vector<Owned<Isolator>>());
+
+  Owned<MesosContainerizer> containerizer(_containerizer.get());
+
+  ContainerID containerId;
+  containerId.set_value(UUID::random().toString());
+
+  const string provisingImageName = "fake-image1";
+
+  Image image;
+  image.set_type(Image::DOCKER);
+  Image::Docker dockerImage;
+  dockerImage.set_name(provisingImageName);
+  image.mutable_docker()->CopyFrom(dockerImage);
+
+  ContainerInfo::MesosInfo mesosInfo;
+  mesosInfo.mutable_image()->CopyFrom(image);
+
+  ContainerInfo containerInfo;
+  containerInfo.set_type(ContainerInfo::MESOS);
+  containerInfo.mutable_mesos()->CopyFrom(mesosInfo);
+
+  TaskInfo taskInfo;
+  taskInfo.set_name("task_name");
+  taskInfo.mutable_task_id()->set_value("task_id");
+
+  SlaveID slaveId = SlaveID();
+  slaveId.set_value("slave_id");
+  taskInfo.mutable_slave_id()->CopyFrom(slaveId);
+
+  CommandInfo commandInfo;
+  taskInfo.mutable_command()->MergeFrom(commandInfo);
+
+  taskInfo.mutable_container()->CopyFrom(containerInfo);
+
+  ExecutorInfo executorInfo = createExecutorInfo("executor", "exit 0");
+  executorInfo.mutable_container()->CopyFrom(containerInfo);
+
+  Future<bool> launch = containerizer->launch(
+      containerId,
+      createContainerConfig(taskInfo, executorInfo, sandbox.get()),
+      map<string, string>(),
+      None());
+
+  Future<Option<ContainerTermination>> wait = containerizer->wait(containerId);
+
+  AWAIT_READY(provision);
+
+  containerizer->destroy(containerId);
+
+  Future<Nothing> pruneImages = containerizer->pruneImages();
+
+  AWAIT_READY(activeImages);
+  EXPECT_EQ(1, activeImages->size());
+  EXPECT_EQ(provisingImageName, activeImages->at(0).docker().name());
 
   ASSERT_TRUE(wait.isPending());
   promise.set(ProvisionInfo{"rootfs", None()});
