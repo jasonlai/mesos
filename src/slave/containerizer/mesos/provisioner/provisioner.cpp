@@ -61,6 +61,7 @@ using mesos::internal::slave::BIND_BACKEND;
 using mesos::internal::slave::COPY_BACKEND;
 using mesos::internal::slave::OVERLAY_BACKEND;
 
+using mesos::slave::ContainerLayers;
 using mesos::slave::ContainerState;
 
 namespace mesos {
@@ -147,6 +148,42 @@ static Try<Nothing> validateBackend(
   return Error("Validation not supported");
 }
 
+
+static Result<ContainerLayers> getContainerLayers(
+    const string& provisionerDir,
+    const ContainerID& containerId)
+{
+  const string path =
+    provisioner::paths::getLayersFilePath(provisionerDir, containerId);
+
+  if (!os::exists(path)) {
+    // This is possible if we recovered a container provisioned before we
+    // started to checkpoint `ContainerLayers`.
+    VLOG(1) << "Layers path '" << path << "' is missing for container' "
+            << containerId << "'";
+    return None();
+  }
+
+  return ::protobuf::read<ContainerLayers>(path);
+}
+
+
+static Try<Nothing> checkpointLayers(
+    const vector<string>& layers,
+    const string& provisionerDir,
+    const ContainerID& containerId)
+{
+  const string path =
+    provisioner::paths::getLayersFilePath(provisionerDir, containerId);
+
+  ContainerLayers containerLayers;
+
+  foreach(const string& layer, layers) {
+    containerLayers.add_paths(layer);
+  }
+
+  return ::protobuf::write<ContainerLayers>(path, containerLayers);
+}
 
 Try<Owned<Provisioner>> Provisioner::create(
     const Flags& flags,
@@ -366,6 +403,17 @@ Future<Nothing> ProvisionerProcess::recover(
       info->rootfses.put(backend, rootfses.get()[backend]);
     }
 
+    Result<ContainerLayers> layers = getContainerLayers(rootDir, containerId);
+
+    if (layers.isError()) {
+      return Failure(
+          "Failed to recover layers for container '" + stringify(containerId) +
+          "': " + layers.error());
+    } else if (layers.isSome()) {
+      info->layers =
+        vector<string>(layers->paths().begin(), layers->paths().end());
+    }
+
     infos.put(containerId, info);
 
     if (knownContainerIds.contains(containerId)) {
@@ -467,6 +515,7 @@ Future<ProvisionInfo> ProvisionerProcess::_provision(
   }
 
   infos[containerId]->rootfses[backend].insert(rootfsId);
+  infos[containerId]->layers = imageInfo.layers;
 
   string backendDir = provisioner::paths::getBackendDir(
       rootDir,
@@ -478,6 +527,13 @@ Future<ProvisionInfo> ProvisionerProcess::_provision(
       rootfs,
       backendDir)
     .then([=]() -> Future<ProvisionInfo> {
+      Try<Nothing> checkpoint =
+        checkpointLayers(imageInfo.layers, rootDir, containerId);
+
+      if(checkpoint.isError()) {
+        return Failure("Failed to checkpoint layers: " + checkpoint.error());
+      }
+
       return ProvisionInfo{
           rootfs, imageInfo.dockerManifest, imageInfo.appcManifest};
     });

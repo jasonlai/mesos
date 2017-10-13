@@ -248,3 +248,13 @@ message ContainerTermination {
   repeated TaskStatus.Reason reasons = 5;
   optional string message = 2;
 }
+
+
+/**
+ * Information about all layers used to provision a container. This is used
+ * to checkpoint and recover in provisioner.
+ */
+message ContainerLayers {
+  // Paths of all layers used to provision the container.
+  repeated string paths = 1;
+}

@@ -167,6 +167,8 @@ private:
     // Mappings: backend -> {rootfsId, ...}
     hashmap<std::string, hashset<std::string>> rootfses;
 
+    Option<std::vector<std::string>> layers;
+
     process::Promise<bool> termination;
 
     // The container status in provisioner.
