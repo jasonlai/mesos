@@ -6675,10 +6675,21 @@ void Master::updateSlave(const UpdateSlaveMessage& message)
   const UpdateSlaveMessage::Type type =
     message.has_type() ? message.type() : UpdateSlaveMessage::OVERSUBSCRIBED;
 
+  // Make a copy of the message so we can transform its resources.
+  UpdateSlaveMessage message_(message);
+
+  convertResourceFormat(
+      message_.mutable_oversubscribed_resources(),
+      POST_RESERVATION_REFINEMENT);
+
+  convertResourceFormat(
+      message_.mutable_total_resources(),
+      POST_RESERVATION_REFINEMENT);
+
   switch (type) {
     case UpdateSlaveMessage::OVERSUBSCRIBED: {
       const Resources oversubscribedResources =
-        message.oversubscribed_resources();
+        message_.oversubscribed_resources();
 
       LOG(INFO) << "Received update of agent " << *slave << " with total"
                 << " oversubscribed resources " << oversubscribedResources;
@@ -6690,7 +6701,7 @@ void Master::updateSlave(const UpdateSlaveMessage& message)
     }
     case UpdateSlaveMessage::TOTAL: {
       const Resources totalResources =
-        message.total_resources();
+        message_.total_resources();
 
       LOG(INFO) << "Received update of agent " << *slave << " with total"
                 << " resources " << totalResources;
