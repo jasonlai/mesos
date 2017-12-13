@@ -576,6 +576,11 @@ protected:
       Framework* framework,
       const std::vector<TaskStatus>& statuses);
 
+  // Batch based implicit reconcile.
+  void __reconcileBatch(
+      const FrameworkID& frameworkId,
+      std::list<std::vector<TaskID>> taskBatches);
+
   // When a slave that was previously registered with this master
   // re-registers, we need to reconcile the master's view of the
   // slave's tasks and executors.  This function also sends the
