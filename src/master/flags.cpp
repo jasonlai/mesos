@@ -682,4 +682,18 @@ mesos::internal::master::Flags::Flags()
         }
         return None();
       });
+
+  // The following flags are uber specific.
+  add(&Flags::implicit_reconcile_batch_interval,
+      "implicit_reconcile_batch_interval",
+      "How long to wait between each batch of status update sent back\n"
+      "to framework for implicit reconciliation response.",
+      Seconds(5));
+
+  add(&Flags::implicit_reconcile_batch_size,
+      "implicit_reconcile_batch_size",
+      "How many status updates in each batch to send back\n"
+      "to framework for implicit reconciliation response.",
+      1000);
+  // End of uber specific flags.
 }
