@@ -99,6 +99,11 @@ public:
   bool require_agent_domain;
   Option<DomainInfo> domain;
 
+  // The following flags are uber specific.
+  Duration implicit_reconcile_batch_interval;
+  size_t implicit_reconcile_batch_size;
+  // End of uber specific flags.
+
   // The following flags are executable specific (e.g., since we only
   // have one instance of libprocess per execution, we only want to
   // advertise the IP and port option once, here).

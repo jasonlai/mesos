@@ -8346,6 +8346,85 @@ void Master::reconcileTasks(
 }
 
 
+void Master::__reconcileBatch(
+    const FrameworkID& frameworkId,
+    list<vector<TaskID>> taskBatches)
+{
+  if (taskBatches.empty()) {
+    return;
+  }
+
+  vector<TaskID> batch = taskBatches.front();
+  taskBatches.pop_front();
+
+  Framework* framework = getFramework(frameworkId);
+  if (framework == nullptr) {
+    LOG(WARNING) << "Framework " << frameworkId
+                 << " is not active for implicit reconciliation anymore";
+    return;
+  }
+
+  foreach (const TaskID& taskId, batch) {
+    if (!framework->tasks.contains(taskId)) {
+      VLOG(1) << "Skip implicit reconciliation state for inactive task "
+              << taskId << " of framework " << *framework;
+      continue;
+    }
+
+    const Task* task = framework->tasks[taskId];
+    const TaskState& state = task->has_status_update_state()
+        ? task->status_update_state()
+        : task->state();
+
+    const Option<ExecutorID>& executorId = task->has_executor_id()
+        ? Option<ExecutorID>(task->executor_id())
+        : None();
+
+    const StatusUpdate& update = protobuf::createStatusUpdate(
+        framework->id(),
+        task->slave_id(),
+        task->task_id(),
+        state,
+        TaskStatus::SOURCE_MASTER,
+        None(),
+        "Reconciliation: Latest task state",
+        TaskStatus::REASON_RECONCILIATION,
+        executorId,
+        protobuf::getTaskHealth(*task),
+        protobuf::getTaskCheckStatus(*task),
+        None(),
+        protobuf::getTaskContainerStatus(*task));
+
+    VLOG(1) << "Sending implicit reconciliation state "
+            << update.status().state()
+            << " for task " << update.status().task_id()
+            << " of framework " << *framework;
+
+    // TODO(bmahler): Consider using forward(); might lead to too
+    // much logging.
+    StatusUpdateMessage message;
+    message.mutable_update()->CopyFrom(update);
+    framework->send(message);
+  }
+
+  if (taskBatches.empty()) {
+    VLOG(1) << "Finished implicit reconciliation batches for framework "
+            << frameworkId;
+
+    return;
+  }
+
+  VLOG(1) << "Next batch implicit reconcilation for framework " << frameworkId
+          << " will happen after " << flags.implicit_reconcile_batch_interval;
+
+  delay(flags.implicit_reconcile_batch_interval,
+        self(),
+        &Self::__reconcileBatch,
+        frameworkId,
+        taskBatches);
+}
+
+
 void Master::_reconcileTasks(
     Framework* framework,
     const vector<TaskStatus>& statuses)
@@ -8382,40 +8461,33 @@ void Master::_reconcileTasks(
       framework->send(message);
     }
 
-    foreachvalue (Task* task, framework->tasks) {
-      const TaskState& state = task->has_status_update_state()
-          ? task->status_update_state()
-          : task->state();
+    const size_t batchSize = flags.implicit_reconcile_batch_size;
 
-      const Option<ExecutorID>& executorId = task->has_executor_id()
-          ? Option<ExecutorID>(task->executor_id())
-          : None();
+    list<vector<TaskID>> reconcileBatches;
+    vector<TaskID> currBatch;
+    currBatch.reserve(batchSize);
+    foreachkey (const TaskID& taskID, framework->tasks) {
+      currBatch.push_back(taskID);
+      if (currBatch.size() >= batchSize) {
+        reconcileBatches.push_back(vector<TaskID>{});
+        reconcileBatches.back().swap(currBatch);
+        currBatch.reserve(batchSize);
+      }
+    }
 
-      const StatusUpdate& update = protobuf::createStatusUpdate(
-          framework->id(),
-          task->slave_id(),
-          task->task_id(),
-          state,
-          TaskStatus::SOURCE_MASTER,
-          None(),
-          "Reconciliation: Latest task state",
-          TaskStatus::REASON_RECONCILIATION,
-          executorId,
-          protobuf::getTaskHealth(*task),
-          protobuf::getTaskCheckStatus(*task),
-          None(),
-          protobuf::getTaskContainerStatus(*task));
+    if (!currBatch.empty()) {
+      reconcileBatches.emplace_back(std::move(currBatch));
+    }
 
-      VLOG(1) << "Sending implicit reconciliation state "
-              << update.status().state()
-              << " for task " << update.status().task_id()
-              << " of framework " << *framework;
+    if (!reconcileBatches.empty()) {
+      VLOG(1) << "Breaking implicit reconcilation response for framework "
+              << framework->id() << " into "
+              << reconcileBatches.size() << " batches";
 
-      // TODO(bmahler): Consider using forward(); might lead to too
-      // much logging.
-      StatusUpdateMessage message;
-      message.mutable_update()->CopyFrom(update);
-      framework->send(message);
+      dispatch(self(),
+               &Self::__reconcileBatch,
+               framework->id(),
+               reconcileBatches);
     }
 
     return;
