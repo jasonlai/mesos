@@ -51,6 +51,41 @@ Try<Nothing> equal(
 }
 
 
+Try<Nothing> any(
+    const SlaveInfo& previous,
+    const SlaveInfo& current)
+{
+  return Nothing();
+}
+
+
+// T is instantiated below as either `Resource` or `Attribute`.
+template<typename T>
+Try<T> getMatchingValue(
+  const T& previous,
+  const google::protobuf::RepeatedPtrField<T>& values)
+{
+  auto match = std::find_if(
+      values.begin(),
+      values.end(),
+      [&previous](const T& value) {
+        return previous.name() == value.name();
+      });
+
+  if (match == values.end()) {
+    return Error("Couldn't find '" + previous.name() + "'");
+  }
+
+  if (match->type() != previous.type()) {
+    return Error(
+        "Type of '" + previous.name() + "' changed from " +
+        stringify(previous.type()) + " to " + stringify(match->type()));
+  }
+
+  return *match;
+}
+
+
 Try<Nothing> additive(
     const SlaveInfo& previous,
     const SlaveInfo& current)

@@ -887,7 +887,8 @@ void Slave::initialize()
 
   // Check that the reconfiguration_policy flag is valid.
   if (flags.reconfiguration_policy != "equal" &&
-      flags.reconfiguration_policy != "additive") {
+      flags.reconfiguration_policy != "additive" &&
+      flags.reconfiguration_policy != "any") {
     EXIT(EXIT_FAILURE)
       << "Unknown option for 'reconfiguration_policy' flag "
       << flags.reconfiguration_policy << "."
@@ -6856,6 +6857,9 @@ Try<Nothing> Slave::compatible(
   const SlaveInfo& current) const
 {
   // TODO(vinod): Also check for version compatibility.
+  if (flags.reconfiguration_policy == "any") {
+    return compatibility::any(previous, current);
+  }
 
   if (flags.reconfiguration_policy == "equal") {
     return compatibility::equal(previous, current);
