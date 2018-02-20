@@ -60,6 +60,19 @@ Try<Nothing> additive(
     const SlaveInfo& previous,
     const SlaveInfo& current);
 
+
+// This function checks whether the changes between `previous` and `current`
+// are considered compatible under the "any" policy, as given by the table
+// below:
+//
+// Field      | Constraint
+// -----------------------------------------------------------------------------
+// *          | No restriction
+
+Try<Nothing> any(
+    const SlaveInfo& previous,
+    const SlaveInfo& current);
+
 } // namespace compatibility {
 } // namespace slave {
 } // namespace internal {
