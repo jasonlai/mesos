@@ -730,6 +730,90 @@ Try<Nothing> mountSpecialFilesystems(const string& root)
 }
 
 
+// BEGIN: Uber specific code for T838893
+Try<Nothing> mountCGroupFilesystems(
+    const string& root,
+    const string& hostCGroupPath = "/sys/fs/cgroup",
+    const string& containerCGroupPath = "/sys/fs/cgroup",
+    const bool readonly = true)
+{
+  if (!os::exists(hostCGroupPath)) {
+    return Error(
+        "Host CGroup FS does not exist at '" + hostCGroupPath + "'");
+  }
+
+  const string realContainerCGroupPath =
+      path::join(root, containerCGroupPath);
+
+  if (!os::exists(realContainerCGroupPath)) {
+    return Error(
+        "CGroup root path does not exist in the target container at '"
+        + containerCGroupPath + "'");
+  }
+
+  if (readonly) {
+    const Try<MountInfoTable> table = MountInfoTable::read();
+    vector<MountInfoTable::Entry> entries;
+
+    foreach (const MountInfoTable::Entry& entry, table->entries) {
+      if (entry.target == hostCGroupPath ||
+          strings::startsWith(entry.target, hostCGroupPath + "/")) {
+        entries.push_back(entry);
+      }
+    }
+
+    if (entries.empty()) {
+      return Error(
+          "No CGroup mount points found at '" + hostCGroupPath + "'");
+    }
+
+    // As `fs::MountInfoTable::read` returns a list of mount entries sorted
+    // hierarchically by default, we reverse-order the filtered CGroup FS
+    // mount points, so we can remount them as read-only from the leaf mount
+    // points back to the root ones.
+    foreach (
+        const MountInfoTable::Entry& entry,
+        adaptor::reverse(entries)) {
+      Try<Nothing> mnt = fs::mount(
+          None(),
+          entry.target,
+          None(),
+          // Remounts the target as readonly. It also disables the set-user-ID
+          // bits, disallows binaries from being executed and disables device
+          // nodes from being access on the mount points. For more info about
+          // the options here, please see also `mount(2)`.
+          MS_BIND | MS_RDONLY | MS_REMOUNT | MS_NOSUID | MS_NOEXEC | MS_NODEV,
+          None());
+
+      if (mnt.isError()) {
+        return Error(
+            "Failed to remount CGroup mount point at '" + entry.target +
+            "' as read-only.");
+      }
+    }
+  }
+
+  // Simply moves CGroup mount points from host filesystem to container
+  // filesystem.
+  Try<Nothing> mnt = fs::mount(
+      hostCGroupPath,
+      realContainerCGroupPath,
+      None(),
+      MS_MOVE,
+      None());
+
+  if (mnt.isError()) {
+    return Error(
+        "Failed to move host CGroup mount points from '" +
+        hostCGroupPath + "' into container at '" +
+        containerCGroupPath + "': " + mnt.error());
+  }
+
+  return Nothing();
+}
+// END: Uber specific code for T838893
+
+
 Try<Nothing> createStandardDevices(const string& root)
 {
   // List of standard devices useful for a chroot environment.
@@ -819,6 +903,15 @@ Try<Nothing> enter(const string& root)
   if (mount.isError()) {
     return Error("Failed to mount: " + mount.error());
   }
+
+  // BEGIN: Uber specific code for T838893
+  // Mount CGroup filesystems.
+  mount = internal::mountCGroupFilesystems(root);
+  if (mount.isError()) {
+    return Error(
+        "Failed to mount CGroup filesystems: " + mount.error());
+  }
+  // END: Uber specific code for T838893
 
   // Create basic device nodes.
   Try<Nothing> create = internal::createStandardDevices(root);
