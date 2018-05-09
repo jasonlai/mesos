@@ -1600,6 +1600,20 @@ void Slave::reregistered(
   switch (state) {
     case DISCONNECTED:
       LOG(INFO) << "Re-registered with master " << master.get();
+
+      // Agent is running a different `SlaveInfo` from recovered. This was
+      // permitted by `flags.reconfiguration_policy` but we want to correct the
+      // checkpointed info.
+      if (requiredMasterCapabilities.agentUpdate &&
+          flags.reconfiguration_policy == "any") {
+        // Checkpoint reconfigured slave info.
+        const string path = paths::getSlaveInfoPath(metaDir, slaveId);
+
+        LOG(INFO) << "Checkpointing reconfigured SlaveInfo to '" << path << "'";
+
+        CHECK_SOME(state::checkpoint(path, info));
+      }
+
       state = RUNNING;
       taskStatusUpdateManager->resume(); // Resume status updates.
 
