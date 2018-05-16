@@ -48,10 +48,12 @@ extern "C" {
 #include <stout/strings.hpp>
 #include <stout/synchronized.hpp>
 
+#include <stout/os/mkdir.hpp>
 #include <stout/os/read.hpp>
 #include <stout/os/realpath.hpp>
 #include <stout/os/shell.hpp>
 #include <stout/os/stat.hpp>
+#include <stout/os/touch.hpp>
 
 #include "common/status_utils.hpp"
 
@@ -301,6 +303,52 @@ Try<MountInfoTable::Entry> MountInfoTable::findByTarget(
   // '/' is always mounted and will be the immediate parent if no
   // other mounts found in between.
   return Error("Not found");
+}
+
+
+Try<bool> MountInfoTable::makeSlave(const hashset<string>& blacklist)
+{
+  if (blacklist.empty()) {
+    const Try<Nothing> mnt = mount(
+        None(),
+        "/",
+        None(),
+        MS_SLAVE | MS_REC,
+        None());
+    if (mnt.isError()) {
+      return Error("Failed to mark '/' as rslave: " + mnt.error());
+    }
+    return true;
+  }
+
+  const Try<MountInfoTable> table = read();
+  if (table.isError()) {
+    return Error("Failed to read mount table: " + table.error());
+  }
+
+  bool rslave = true;
+
+  foreach (const Entry& entry, adaptor::reverse(table->entries)) {
+    if (blacklist.contains(entry.target)) {
+      // Don't mark the mount entry as MS_SLAVE if the target path is
+      // whitelisted
+      rslave = false;
+    } else {
+      const Try<Nothing> mnt = mount(
+          None(),
+          entry.target,
+          None(),
+          MS_SLAVE,
+          None());
+
+      if (mnt.isError()) {
+        return Error(
+            "Failed to mark '" + entry.target + "' as slave: " + mnt.error());
+      }
+    }
+  }
+
+  return rslave;
 }
 
 

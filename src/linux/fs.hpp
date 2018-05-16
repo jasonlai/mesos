@@ -26,6 +26,7 @@
 #include <string>
 #include <vector>
 
+#include <stout/hashset.hpp>
 #include <stout/nothing.hpp>
 #include <stout/option.hpp>
 #include <stout/try.hpp>
@@ -282,6 +283,13 @@ struct MountInfoTable {
   // the mount table entry that is the immediate parent of the given
   // target path (similar to `findmnt --target [TARGET]`).
   static Try<Entry> findByTarget(const std::string& target);
+
+  // Mark entries in the mount table as MS_SLAVE.
+  // @param   blacklist A list of mount points that should be skipped
+  //                    from being marked as slave mounts.
+  // @return  Whether all mount point have been marked as slave mounts,
+  //          if the operation succeeded.
+  static Try<bool> makeSlave(const hashset<std::string>& blacklist);
 
   std::vector<Entry> entries;
 };
