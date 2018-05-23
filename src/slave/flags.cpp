@@ -513,7 +513,7 @@ mesos::internal::slave::Flags::Flags()
       "the master may still reject the agent if it detects a change that it\n"
       "considers unacceptable, which, e.g., currently happens when port or\n"
       "hostname are changed.",
-      "equal");
+      "any");
 
   add(&Flags::strict,
       "strict",
