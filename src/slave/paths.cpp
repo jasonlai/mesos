@@ -791,7 +791,11 @@ Try<Nothing> createSandboxDirectory(
 #ifndef __WINDOWS__
   // Since this is a sandbox directory containing private task data,
   // we want to ensure that it is not accessible to "others".
-  Try<Nothing> chmod = os::chmod(directory, 0750);
+  // UBER SPECIFIC:
+  // we are using 0755 instead of 0750 until discussion around
+  // MESOS-8332 is resolved.
+  Try<Nothing> chmod = os::chmod(directory, 0755);
+  // UBER SPECIFIC: end.
   if (mkdir.isError()) {
     return Error("Failed to chmod directory: " + chmod.error());
   }
