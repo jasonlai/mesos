@@ -612,6 +612,39 @@ Try<Nothing> pivot_root(
 }
 
 
+Try<Nothing> createIfNotExists(const string& path, const bool isDir)
+{
+  if (os::exists(path)) {
+    return Nothing();
+  }
+
+  if (isDir) {
+    const Try<Nothing> mkdir = os::mkdir(path);
+    if (mkdir.isError()) {
+      return Error(
+          "Failed to create the mount point at '" + path +
+          "': " + mkdir.error());
+    }
+    return Nothing();
+  }
+
+  const string& dirname = Path(path).dirname();
+  const Try<Nothing> mkdir = os::mkdir(dirname);
+  if (mkdir.isError()) {
+    return Error(
+        "Failed to create directory '" + dirname +
+        "' for the mount point: " + mkdir.error());
+  }
+
+  const Try<Nothing> touch = os::touch(path);
+  if (touch.isError()) {
+    return Error(
+        "Failed to touch the mount point at '" + path +
+        "': " + touch.error());
+  }
+  return Nothing();
+}
+
 namespace chroot {
 
 namespace internal {

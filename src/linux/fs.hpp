@@ -381,6 +381,13 @@ Try<Nothing> unmountAll(const std::string& target, int flags = 0);
 // Change the root filesystem.
 Try<Nothing> pivot_root(const std::string& newRoot, const std::string& putOld);
 
+
+// Create a file or a directory only if it does not already exist.
+// @param   path    The target path to check and create if it does not exist.
+// @param   isDir   Whether the target should be a directory or not.
+// @return  Whether the operation was successful.
+Try<Nothing> createIfNotExists(const std::string& path, const bool isDir);
+
 namespace chroot {
 
 // Enter a 'chroot' environment. The caller should be in a new mount
