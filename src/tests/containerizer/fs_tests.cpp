@@ -375,6 +375,40 @@ TEST_F(FsTest, ROOT_FindTargetInMountInfoTable)
   EXPECT_EQ(entry->target, targetFile);
 }
 
+
+TEST_F(FsTest, ROOT_CreateIfNotExists)
+{
+  const Try<string> base = environment->mkdtemp();
+  ASSERT_SOME(base);
+
+  ASSERT_SOME(fs::createIfNotExists(base.get(), true));
+
+  const string parentDir = path::join(base.get(), "parent");
+  const string childDir = path::join(parentDir, "child-dir");
+  const string childFile = path::join(parentDir, "child-file");
+
+  ASSERT_FALSE(os::exists(parentDir));
+  ASSERT_FALSE(os::exists(childDir));
+  ASSERT_FALSE(os::exists(childFile));
+
+  ASSERT_SOME(fs::createIfNotExists(childDir, true));
+  ASSERT_TRUE(os::stat::isdir(parentDir));
+  ASSERT_TRUE(os::stat::isdir(childDir));
+
+  ASSERT_SOME(fs::createIfNotExists(childFile, false));
+  ASSERT_TRUE(os::stat::isfile(childFile));
+
+  const string readonlyDir = path::join(base.get(), "readonly");
+  ASSERT_SOME(os::mkdir(readonlyDir));
+  ASSERT_SOME(fs::mount(readonlyDir, readonlyDir, None(), MS_BIND, None()));
+  ASSERT_SOME(fs::mount(None(), readonlyDir, None(), MS_RDONLY, None()));
+
+  const string errorPath = path::join(readonlyDir, "error");
+  ASSERT_ERROR(fs::createIfNotExists(errorPath, false));
+  ASSERT_ERROR(fs::createIfNotExists(errorPath, true));
+  ASSERT_FALSE(os::exists(errorPath));
+}
+
 } // namespace tests {
 } // namespace internal {
 } // namespace mesos {
