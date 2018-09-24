@@ -123,6 +123,42 @@ TEST_TEMP_DISABLED_ON_WINDOWS(PathTest, Extension)
 }
 
 
+TEST(PathTest, Normalize)
+{
+  EXPECT_SOME_EQ(".", path::normalize(""));
+
+#ifndef __WINDOWS__
+  EXPECT_SOME_EQ("a/b/c", path::normalize("a/b/c/"));
+  EXPECT_SOME_EQ("a/b/c", path::normalize("a///b//c"));
+  EXPECT_SOME_EQ("a/b/c", path::normalize("a/foobar/../b//c/"));
+  EXPECT_SOME_EQ("a/b/c/.d", path::normalize("a/b/c/./.d/"));
+
+  EXPECT_SOME_EQ(".", path::normalize("a/b/../c/../.."));
+  EXPECT_SOME_EQ(".", path::normalize("a/b/../c/../../"));
+
+  EXPECT_SOME_EQ("..", path::normalize("a/../b/c/../../.."));
+  EXPECT_SOME_EQ("../..", path::normalize("a/../../.."));
+  EXPECT_SOME_EQ("../../a", path::normalize("../.././a/"));
+  EXPECT_SOME_EQ("../../b", path::normalize("../../a///../b"));
+  EXPECT_SOME_EQ("../../c", path::normalize("a/../b/.././../../c"));
+
+  EXPECT_SOME_EQ("/a/b/c", path::normalize("/a/b/c"));
+  EXPECT_SOME_EQ("/a/b/c", path::normalize("//a///b/c"));
+  EXPECT_SOME_EQ("/a/b/c", path::normalize("/a/foobar/../b//c/"));
+  EXPECT_SOME_EQ("/a/b/c/.d", path::normalize("/a/b/c/./.d/"));
+
+  EXPECT_SOME_EQ("/", path::normalize("/a/b/../c/../.."));
+  EXPECT_SOME_EQ("/", path::normalize("/a/b/../c/../../"));
+
+  EXPECT_ERROR(path::normalize("/a/../b/c/../../.."));
+  EXPECT_ERROR(path::normalize("/a/../../.."));
+  EXPECT_ERROR(path::normalize("/../.././a/"));
+  EXPECT_ERROR(path::normalize("/../../a///../b"));
+  EXPECT_ERROR(path::normalize("//a/../b/.././../../c"));
+#endif // __WINDOWS__
+}
+
+
 TEST_TEMP_DISABLED_ON_WINDOWS(PathTest, Join)
 {
   EXPECT_EQ("a/b/c", path::join("a", "b", "c"));
