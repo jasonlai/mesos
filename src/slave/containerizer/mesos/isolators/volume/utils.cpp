@@ -14,40 +14,44 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef __VOLUME_HOST_PATH_ISOLATOR_HPP__
-#define __VOLUME_HOST_PATH_ISOLATOR_HPP__
+#include <stout/path.hpp>
+#include <stout/stringify.hpp>
+#include <stout/strings.hpp>
 
-#include "slave/flags.hpp"
+#include "slave/containerizer/mesos/isolators/volume/utils.hpp"
 
-#include "slave/containerizer/mesos/isolator.hpp"
+using std::string;
+using std::vector;
 
 namespace mesos {
 namespace internal {
 namespace slave {
+namespace volume {
 
-class VolumeHostPathIsolatorProcess : public MesosIsolatorProcess
+vector<string> parseHostPathWhitelist(const Option<string>& whitelist)
 {
-public:
-  static Try<mesos::slave::Isolator*> create(const Flags& flags);
+  if (whitelist.isNone()) {
+    return vector<string>();
+  }
+  return strings::split(whitelist.get(), HOST_PATH_WHITELIST_DELIM);
+}
 
-  virtual ~VolumeHostPathIsolatorProcess();
 
-  virtual bool supportsNesting();
-  virtual bool supportsStandalone();
+bool validatePathFromWhitelist(
+    const string& path,
+    const vector<string>& whitelist)
+{
+  foreach (const string& allowedPath, whitelist) {
+    const string allowedDirectory = path::join(
+        allowedPath, stringify(os::PATH_SEPARATOR));
+    if (path == allowedPath || strings::startsWith(path, allowedDirectory)) {
+      return true;
+    }
+  }
+  return false;
+}
 
-  virtual process::Future<Option<mesos::slave::ContainerLaunchInfo>> prepare(
-      const ContainerID& containerId,
-      const mesos::slave::ContainerConfig& containerConfig);
-
-private:
-  VolumeHostPathIsolatorProcess(const Flags& flags);
-
-  const Flags flags;
-  const std::vector<std::string> hostPathWhitelist;
-};
-
+} // namespace volume {
 } // namespace slave {
 } // namespace internal {
 } // namespace mesos {
-
-#endif // __VOLUME_HOST_PATH_ISOLATOR_HPP__
