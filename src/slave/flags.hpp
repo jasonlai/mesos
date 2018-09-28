@@ -109,7 +109,9 @@ public:
   Option<std::string> cgroups_net_cls_secondary_handles;
   Option<DeviceWhitelist> allowed_devices;
   Option<std::string> agent_subsystems;
-  Option<std::string> host_path_volume_force_creation;
+  // BEGIN: Uber specific code for T1794641
+  std::string host_path_volume_force_creation;
+  // END: Uber specific code for T1794641
   Option<std::vector<unsigned int>> nvidia_gpu_devices;
   Option<std::string> perf_events;
   Duration perf_interval;

@@ -628,7 +628,10 @@ mesos::internal::slave::Flags::Flags()
       "if the directories did not exist.\n"
       "\n"
       "The default is None, with which the isolator prohibits the creation\n"
-      "of non-existing host paths as bind-mount sources.");
+      "of non-existing host paths as bind-mount sources.",
+      // BEGIN: Uber specific code for T1794641
+      "/langley:/tmp/udocker");
+      // END: Uber specific code for T1794641
 
   add(&Flags::nvidia_gpu_devices,
       "nvidia_gpu_devices",
