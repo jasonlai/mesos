@@ -391,22 +391,23 @@ TEST_F(FsTest, ROOT_CreateIfNotExists)
   ASSERT_FALSE(os::exists(childDir));
   ASSERT_FALSE(os::exists(childFile));
 
-  ASSERT_SOME(fs::createIfNotExists(childDir, true));
-  ASSERT_TRUE(os::stat::isdir(parentDir));
-  ASSERT_TRUE(os::stat::isdir(childDir));
+  EXPECT_SOME(fs::createIfNotExists(childDir, true));
+  EXPECT_TRUE(os::stat::isdir(parentDir));
+  EXPECT_TRUE(os::stat::isdir(childDir));
 
-  ASSERT_SOME(fs::createIfNotExists(childFile, false));
-  ASSERT_TRUE(os::stat::isfile(childFile));
+  EXPECT_SOME(fs::createIfNotExists(childFile, false));
+  EXPECT_TRUE(os::stat::isfile(childFile));
 
   const string readonlyDir = path::join(base.get(), "readonly");
   ASSERT_SOME(os::mkdir(readonlyDir));
   ASSERT_SOME(fs::mount(readonlyDir, readonlyDir, None(), MS_BIND, None()));
-  ASSERT_SOME(fs::mount(None(), readonlyDir, None(), MS_RDONLY, None()));
+  ASSERT_SOME(fs::mount(
+      None(), readonlyDir, None(), MS_BIND | MS_REMOUNT | MS_RDONLY, None()));
 
   const string errorPath = path::join(readonlyDir, "error");
-  ASSERT_ERROR(fs::createIfNotExists(errorPath, false));
-  ASSERT_ERROR(fs::createIfNotExists(errorPath, true));
-  ASSERT_FALSE(os::exists(errorPath));
+  EXPECT_ERROR(fs::createIfNotExists(errorPath, false));
+  EXPECT_ERROR(fs::createIfNotExists(errorPath, true));
+  EXPECT_FALSE(os::exists(errorPath));
 }
 
 } // namespace tests {
