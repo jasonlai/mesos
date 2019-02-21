@@ -2485,8 +2485,6 @@ Future<Response> Http::_launchContainer(
     ContentType acceptType,
     const Owned<ObjectApprovers>& approvers) const
 {
-  Option<string> user;
-
   // Attempt to get the executor associated with this ContainerID.
   // We only expect to get the executor when launching a nested container
   // under a container launched via a scheduler. In other cases, we are
@@ -2504,24 +2502,14 @@ Future<Response> Http::_launchContainer(
             executor->info, framework->info, commandInfo, containerId)) {
       return Forbidden();
     }
-
-    // By default, we use the executor's user.
-    // The CommandInfo can override it, if specified.
-    user = executor->user;
   }
 
   ContainerConfig containerConfig;
   containerConfig.mutable_command_info()->CopyFrom(commandInfo);
 
 #ifndef __WINDOWS__
-  if (slave->flags.switch_user) {
-    if (commandInfo.has_user()) {
-      user = commandInfo.user();
-    }
-
-    if (user.isSome()) {
-      containerConfig.set_user(user.get());
-    }
+  if (slave->flags.switch_user && commandInfo.has_user()) {
+    containerConfig.set_user(commandInfo.user());
   }
 #endif // __WINDOWS__
 
@@ -3054,8 +3042,8 @@ Future<Response> Http::_attachContainerInput(
       std::move(decoder), encoder, writer);
 
   return slave->containerizer->attach(containerId)
-    .then([mediaTypes, reader, writer, transform](
-        Connection connection) mutable {
+    .then(defer(slave->self(), [=](
+        Connection connection) mutable -> Future<Response> {
       Request request;
       request.method = "POST";
       request.type = Request::PIPE;
@@ -3082,6 +3070,43 @@ Future<Response> Http::_attachContainerInput(
 
           writer.close();
          });
+
+      // This is a non Keep-Alive request which means the connection
+      // will be closed when the response is received. Since the
+      // 'Connection' is reference-counted, we must maintain a copy
+      // until the disconnection occurs.
+      connection.disconnected()
+        .onAny([connection]() {});
+
+      return connection.send(request)
+        .onAny(defer(
+            slave->self(),
+            [=](const Future<Response>&) {
+              // After we have received a response for `ATTACH_CONTAINER_INPUT`
+              // call, we need to send an acknowledgment to the IOSwitchboard,
+              // so that the IOSwitchboard process can terminate itself. This is
+              // a workaround for the problem with dropping outstanding HTTP
+              // responses due to a lack of graceful shutdown in libprocess.
+              acknowledgeContainerInputResponse(containerId)
+                .onFailed([containerId](const string& failure) {
+                  LOG(ERROR) << "Failed to send an acknowledgment to the"
+                             << " IOSwitchboard for container '"
+                             << containerId << "': " << failure;
+              });
+            }));
+    }));
+}
+
+
+Future<Response> Http::acknowledgeContainerInputResponse(
+    const ContainerID& containerId) const {
+  return slave->containerizer->attach(containerId)
+    .then([](Connection connection) {
+      Request request;
+      request.method = "POST";
+      request.type = Request::BODY;
+      request.url.domain = "";
+      request.url.path = "/acknowledge_container_input_response";
 
       // This is a non Keep-Alive request which means the connection
       // will be closed when the response is received. Since the

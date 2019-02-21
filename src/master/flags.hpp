@@ -60,7 +60,7 @@ public:
   Option<std::string> agent_removal_rate_limit;
   std::string webui_dir;
   Option<Path> whitelist;
-  std::string user_sorter;
+  std::string role_sorter;
   std::string framework_sorter;
   Duration allocation_interval;
   Option<std::string> cluster;
@@ -68,6 +68,7 @@ public:
   Option<std::string> weights;
   bool authenticate_frameworks;
   bool authenticate_agents;
+  Duration authentication_v0_timeout;
   bool authenticate_http_readonly;
   bool authenticate_http_readwrite;
   bool authenticate_http_frameworks;
@@ -82,6 +83,7 @@ public:
   std::string allocator;
   Option<std::set<std::string>> fair_sharing_excluded_resource_names;
   bool filter_gpu_resources;
+  std::string min_allocatable_resources;
   Option<std::string> hooks;
   Duration agent_ping_timeout;
   size_t max_agent_ping_timeouts;

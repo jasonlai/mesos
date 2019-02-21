@@ -176,15 +176,17 @@ mesos::internal::master::Flags::Flags()
       "machines are accepted. Path can be of the form\n"
       "`file:///path/to/file` or `/path/to/file`.\n");
 
-  add(&Flags::user_sorter,
-      "user_sorter",
-      "Policy to use for allocating resources between users. May be one of:\n"
-      "  dominant_resource_fairness (drf)",
+  add(&Flags::role_sorter,
+      "role_sorter",
+      flags::DeprecatedName("user_sorter"),
+      "Policy to use for allocating resources between roles when\n"
+      "allocating up to quota guarantees as well as when allocating\n"
+      "up to quota limits. May be one of: [drf, random]",
       "drf");
 
   add(&Flags::framework_sorter,
       "framework_sorter",
-      "Policy to use for allocating resources between a given user's\n"
+      "Policy to use for allocating resources between a given role's\n"
       "frameworks. Options are the same as for `--user_sorter`.",
       "drf");
 
@@ -228,6 +230,16 @@ mesos::internal::master::Flags::Flags()
       "If `true`, only authenticated agents are allowed to register.\n"
       "If `false`, unauthenticated agents are also allowed to register.",
       false);
+
+  // TODO(bmahler): Ideally, we remove this v0-style authentication
+  // in favor of just using HTTP authentication at the libprocess
+  // layer.
+  add(&Flags::authentication_v0_timeout,
+      "authentication_v0_timeout",
+      "The timeout within which an authentication is expected\n"
+      "to complete against a v0 framework or agent. This does not\n"
+      "apply to the v0 or v1 HTTP APIs.",
+      DEFAULT_AUTHENTICATION_V0_TIMEOUT);
 
   // TODO(zhitao): Remove deprecated `--authenticate_http` flag name after
   // the deprecation cycle which started with Mesos 1.0.
@@ -473,6 +485,25 @@ mesos::internal::master::Flags::Flags()
       "  https://www.mail-archive.com/dev@mesos.apache.org/msg37571.html\n"
       "  https://issues.apache.org/jira/browse/MESOS-7576",
       true);
+
+  add(&Flags::min_allocatable_resources,
+      "min_allocatable_resources",
+      "One or more sets of resource quantities that define the minimum\n"
+      "allocatable resources for the allocator. The allocator will only offer\n"
+      "resources that meets the quantity requirement of at least one of the\n"
+      "specified sets. For `SCALAR` type resources, its quantity is its\n"
+      "scalar value. For `RANGES` and `SET` type, their quantities are the\n"
+      "number of different instances in the range or set. For example,\n"
+      "`range:[1-5]` has a quantity of 5 and `set:{a,b}` has a quantity of 2.\n"
+      "The resources in each set should be delimited by semicolons (acting as\n"
+      "logical AND), and each set should be delimited by the pipe character\n"
+      "(acting as logical OR).\n"
+      "(Example: `disk:1|cpu:1;mem:32;port:1` configures the allocator to\n"
+      "only offer resources if they contain a disk resource of at least\n"
+      "1 megabyte, or if they at least contain 1 cpu, 32 megabytes of memory\n"
+      "and 1 port.)\n",
+      "cpus:" + stringify(MIN_CPUS) +
+        "|mem:" + stringify((double)MIN_MEM.bytes() / Bytes::MEGABYTES));
 
   add(&Flags::hooks,
       "hooks",

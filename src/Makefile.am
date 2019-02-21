@@ -978,6 +978,8 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   common/http.cpp							\
   common/protobuf_utils.cpp						\
   common/resources.cpp							\
+  common/resource_quantities.cpp					\
+  common/resource_quantities.hpp					\
   common/resources_utils.cpp						\
   common/roles.cpp							\
   common/type_utils.cpp							\
@@ -1014,6 +1016,7 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   master/allocator/mesos/metrics.cpp					\
   master/allocator/sorter/drf/metrics.cpp				\
   master/allocator/sorter/drf/sorter.cpp				\
+  master/allocator/sorter/random/sorter.cpp				\
   master/contender/contender.cpp					\
   master/contender/standalone.cpp					\
   master/contender/zookeeper.cpp					\
@@ -1165,6 +1168,8 @@ libmesos_no_3rdparty_la_SOURCES +=					\
   master/allocator/sorter/sorter.hpp					\
   master/allocator/sorter/drf/metrics.hpp				\
   master/allocator/sorter/drf/sorter.hpp				\
+  master/allocator/sorter/random/sorter.hpp				\
+  master/allocator/sorter/random/utils.hpp				\
   master/contender/standalone.hpp					\
   master/contender/zookeeper.hpp					\
   master/detector/standalone.hpp					\
@@ -1399,6 +1404,12 @@ MESOS_LINUX_FILES +=							\
   slave/containerizer/mesos/isolators/xfs/utils.hpp			\
   slave/containerizer/mesos/isolators/xfs/disk.cpp			\
   slave/containerizer/mesos/isolators/xfs/disk.hpp
+endif
+
+if ENABLE_LAUNCHER_SEALING
+MESOS_LINUX_FILES +=              \
+  linux/memfd.cpp             \
+  linux/memfd.hpp
 endif
 
 MESOS_LINUX_ROUTING_FILES =						\
@@ -1941,7 +1952,8 @@ if HAS_JAVA
 
 $(MESOS_JAR): $(MESOS_JAR_SOURCE) $(MESOS_JAR_GENERATED) java/mesos.pom
 	@echo "Building mesos-$(PACKAGE_VERSION).jar ..."
-	@cd $(abs_top_builddir)/src/java && $(MVN) -B -q -f mesos.pom clean package
+	@cd $(abs_top_builddir)/src/java &&  \
+	  env JAVA_HOME=$(JAVA_HOME) $(MVN) -B -q -f mesos.pom clean package
 
 # Convenience library for JNI bindings.
 # TODO(Charles Reiss): We really should be building the Java library
@@ -2017,55 +2029,23 @@ nodist_libjava_la_SOURCES =						\
 
 BUILT_SOURCES += $(nodist_libjava_la_SOURCES)
 
-java/jni/org_apache_mesos_MesosSchedulerDriver.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-	  org.apache.mesos.MesosSchedulerDriver
-
-java/jni/org_apache_mesos_MesosExecutorDriver.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-          org.apache.mesos.MesosExecutorDriver
-
-java/jni/org_apache_mesos_Log.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-	  org.apache.mesos.Log
-
-java/jni/org_apache_mesos_state_AbstractState.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-	  org.apache.mesos.state.AbstractState
-
-java/jni/org_apache_mesos_state_LevelDBState.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-	  org.apache.mesos.state.LevelDBState
-
-java/jni/org_apache_mesos_state_LogState.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-	  org.apache.mesos.state.LogState
-
-java/jni/org_apache_mesos_state_Variable.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-	  org.apache.mesos.state.Variable
-
-java/jni/org_apache_mesos_state_ZooKeeperState.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-	  org.apache.mesos.state.ZooKeeperState
-
-java/jni/org_apache_mesos_v1_scheduler_V1Mesos.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-	  org.apache.mesos.v1.scheduler.V1Mesos
-
-java/jni/org_apache_mesos_v1_scheduler_V0Mesos.h: $(MESOS_JAR)
-	$(JAVA_HOME)/bin/javah -d java/jni				\
-	-classpath $(MESOS_JAR):@PROTOBUF_JAR@				\
-	  org.apache.mesos.v1.scheduler.V0Mesos
+# The automatic variable '$(*F)' captures the matching stem (whatever matches
+# the '%') of the target (e.g., 'org_apache_mesos_Log').
+# * For 'javah' recipe, we then substitute '_' with '.' to get the class name
+#   (e.g., org.apache.mesos.Log).
+# * For 'javac -h' recipe, we substitute '_' with '/' to compute the source path
+#   of the java file. Unlike 'javah', 'javac -h' requires java sources to
+#   generate headers.
+java/jni/%.h: $(MESOS_JAR)
+if HAS_JAVAH
+	$(JAVA_HOME)/bin/javah -d java/jni                              \
+	  -classpath $(MESOS_JAR):@PROTOBUF_JAR@                        \
+	   $(subst _,.,$(*F))
+else
+	$(JAVA_HOME)/bin/javac -h java/jni				\
+	  -classpath $(MESOS_JAR):@PROTOBUF_JAR@                        \
+	   $(srcdir)/java/src/$(subst _,/,$(*F)).java
+endif
 
 $(EXAMPLES_JAR): $(EXAMPLES_SOURCE)
 	@echo "Building examples.jar ..."
@@ -2079,7 +2059,7 @@ $(EXAMPLES_JAR): $(EXAMPLES_SOURCE)
 CLEANFILES += $(EXAMPLES_JAR)
 
 maven-install: $(MESOS_JAR) java/mesos.pom
-	$(MVN) -B -q -f java/mesos.pom install
+	env JAVA_HOME=$(JAVA_HOME) $(MVN) -B -q -f java/mesos.pom install
 
 PHONY_TARGETS += maven-install
 endif # HAS_JAVA
@@ -2571,6 +2551,7 @@ mesos_tests_SOURCES =						\
   tests/resource_offers_tests.cpp				\
   tests/resource_provider_manager_tests.cpp			\
   tests/resource_provider_validation_tests.cpp			\
+  tests/resource_quantities_tests.cpp			        \
   tests/resources_tests.cpp					\
   tests/resources_utils.cpp					\
   tests/role_tests.cpp						\
@@ -2683,6 +2664,11 @@ mesos_tests_SOURCES +=						\
   tests/agent_resource_provider_config_api_tests.cpp		\
   tests/storage_local_resource_provider_tests.cpp
 endif
+endif
+
+if ENABLE_LAUNCHER_SEALING
+mesos_tests_SOURCES +=						\
+  tests/containerizer/linux_memfd_tests.cpp
 endif
 
 if ENABLE_LINUX_ROUTING

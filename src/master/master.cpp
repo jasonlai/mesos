@@ -78,6 +78,7 @@
 #include "common/build.hpp"
 #include "common/http.hpp"
 #include "common/protobuf_utils.hpp"
+#include "common/resource_quantities.hpp"
 #include "common/status_utils.hpp"
 
 #include "credentials/credentials.hpp"
@@ -148,6 +149,7 @@ using mesos::master::contender::MasterContender;
 
 using mesos::master::detector::MasterDetector;
 
+using mesos::internal::ResourceQuantities;
 
 static bool isValidFailoverTimeout(const FrameworkInfo& frameworkInfo);
 
@@ -768,6 +770,34 @@ void Master::initialize()
       << " for --offer_timeout: Must be greater than zero";
   }
 
+  // Parse min_allocatable_resources.
+  vector<ResourceQuantities> minAllocatableResources;
+  foreach (
+      const string& token,
+      strings::tokenize(flags.min_allocatable_resources, "|")) {
+    Try<ResourceQuantities> resourceQuantities =
+      ResourceQuantities::fromString(token);
+
+    if (resourceQuantities.isError()) {
+      EXIT(EXIT_FAILURE) << "Error parsing min_allocatable_resources '"
+                         << flags.min_allocatable_resources
+                         << "': " << resourceQuantities.error();
+    }
+
+    // We check the configuration against first-class resources and warn
+    // against possible mis-configuration (e.g. typo).
+    set<string> firstClassResources = {"cpus", "mem", "disk", "ports", "gpus"};
+    for (auto it = resourceQuantities->begin(); it != resourceQuantities->end();
+         ++it) {
+      if (firstClassResources.count(it->first) == 0) {
+        LOG(WARNING) << "Non-first-class resource '" << it->first
+                     << "' is configured as part of min_allocatable_resources";
+      }
+    }
+
+    minAllocatableResources.push_back(resourceQuantities.get());
+  }
+
   // Initialize the allocator.
   allocator->initialize(
       flags.allocation_interval,
@@ -775,7 +805,8 @@ void Master::initialize()
       defer(self(), &Master::inverseOffer, lambda::_1, lambda::_2),
       flags.fair_sharing_excluded_resource_names,
       flags.filter_gpu_resources,
-      flags.domain);
+      flags.domain,
+      minAllocatableResources);
 
   // Parse the whitelist. Passing Allocator::updateWhitelist()
   // callback is safe because we shut down the whitelistWatcher in
@@ -1838,7 +1869,7 @@ void Master::doRegistryGc()
     TimeInfo currentTime = protobuf::getCurrentTime();
     hashset<SlaveID> toRemove;
 
-    foreachpair (const SlaveID& slave,
+    foreachpair (const SlaveID& slaveId,
                  const TimeInfo& removalTime,
                  slaves) {
       // Count-based GC.
@@ -1846,7 +1877,7 @@ void Master::doRegistryGc()
 
       size_t liveCount = count - toRemove.size();
       if (liveCount > flags.registry_max_agent_count) {
-        toRemove.insert(slave);
+        toRemove.insert(slaveId);
         continue;
       }
 
@@ -1855,7 +1886,7 @@ void Master::doRegistryGc()
           currentTime.nanoseconds() - removalTime.nanoseconds());
 
       if (age > flags.registry_max_agent_age) {
-        toRemove.insert(slave);
+        toRemove.insert(slaveId);
       }
     }
 
@@ -1908,29 +1939,49 @@ void Master::_doRegistryGc(
   // operation, but there isn't an easy way to do that.
 
   size_t numRemovedUnreachable = 0;
-  foreach (const SlaveID& slave, toRemoveUnreachable) {
-    if (!slaves.unreachable.contains(slave)) {
-      LOG(WARNING) << "Failed to garbage collect " << slave
+  foreach (const SlaveID& slaveId, toRemoveUnreachable) {
+    if (!slaves.unreachable.contains(slaveId)) {
+      LOG(WARNING) << "Failed to garbage collect " << slaveId
                    << " from the unreachable list";
 
       continue;
     }
 
-    slaves.unreachable.erase(slave);
-    slaves.unreachableTasks.erase(slave);
+    slaves.unreachable.erase(slaveId);
+
+    // TODO(vinod): Consider moving these tasks into `completedTasks` by
+    // transitioning them to a terminal state and sending status updates.
+    // But it's not clear what this state should be. If a framework
+    // reconciles these tasks after this point it would get `TASK_UNKNOWN`
+    // which seems appropriate but we don't keep tasks in this state in-memory.
+    if (slaves.unreachableTasks.contains(slaveId)) {
+      foreachkey (const FrameworkID& frameworkId,
+                  slaves.unreachableTasks.at(slaveId)) {
+        Framework* framework = getFramework(frameworkId);
+        if (framework != nullptr) {
+          foreach (const TaskID& taskId,
+                   slaves.unreachableTasks.at(slaveId).get(frameworkId)) {
+            framework->unreachableTasks.erase(taskId);
+          }
+        }
+      }
+    }
+
+    slaves.unreachableTasks.erase(slaveId);
+
     numRemovedUnreachable++;
   }
 
   size_t numRemovedGone = 0;
-  foreach (const SlaveID& slave, toRemoveGone) {
-    if (!slaves.gone.contains(slave)) {
-      LOG(WARNING) << "Failed to garbage collect " << slave
+  foreach (const SlaveID& slaveId, toRemoveGone) {
+    if (!slaves.gone.contains(slaveId)) {
+      LOG(WARNING) << "Failed to garbage collect " << slaveId
                    << " from the gone list";
 
       continue;
     }
 
-    slaves.gone.erase(slave);
+    slaves.gone.erase(slaveId);
     numRemovedGone++;
   }
 
@@ -3612,17 +3663,7 @@ Future<bool> Master::authorizeReserveResources(
     return authorizer.get()->authorized(request);
   }
 
-  return await(authorizations)
-      .then([](const list<Future<bool>>& authorizations)
-            -> Future<bool> {
-        // Compute a disjunction.
-        foreach (const Future<bool>& authorization, authorizations) {
-          if (!authorization.get()) {
-            return false;
-          }
-        }
-        return true;
-      });
+  return collectAuthorizations(authorizations);
 }
 
 
@@ -3675,17 +3716,7 @@ Future<bool> Master::authorizeUnreserveResources(
     return authorizer.get()->authorized(request);
   }
 
-  return await(authorizations)
-      .then([](const list<Future<bool>>& authorizations)
-            -> Future<bool> {
-        // Compute a disjunction.
-        foreach (const Future<bool>& authorization, authorizations) {
-          if (!authorization.get()) {
-            return false;
-          }
-        }
-        return true;
-      });
+  return collectAuthorizations(authorizations);
 }
 
 
@@ -3742,17 +3773,7 @@ Future<bool> Master::authorizeCreateVolume(
     return authorizer.get()->authorized(request);
   }
 
-  return await(authorizations)
-      .then([](const list<Future<bool>>& authorizations)
-            -> Future<bool> {
-        // Compute a disjunction.
-        foreach (const Future<bool>& authorization, authorizations) {
-          if (!authorization.get()) {
-            return false;
-          }
-        }
-        return true;
-      });
+  return collectAuthorizations(authorizations);
 }
 
 
@@ -3794,17 +3815,7 @@ Future<bool> Master::authorizeDestroyVolume(
     return authorizer.get()->authorized(request);
   }
 
-  return await(authorizations)
-      .then([](const list<Future<bool>>& authorizations)
-            -> Future<bool> {
-        // Compute a disjunction.
-        foreach (const Future<bool>& authorization, authorizations) {
-          if (!authorization.get()) {
-            return false;
-          }
-        }
-        return true;
-      });
+  return collectAuthorizations(authorizations);
 }
 
 
@@ -3887,11 +3898,7 @@ Future<bool> Master::authorizeSlave(
         authorizeReserveResources(slaveInfo.resources(), principal));
   }
 
-  return collect(authorizations)
-    .then([](const list<bool>& results)
-          -> Future<bool> {
-      return std::find(results.begin(), results.end(), false) == results.end();
-    });
+  return collectAuthorizations(authorizations);
 }
 
 
@@ -4654,8 +4661,8 @@ void Master::_accept(
   // The order of the conversions is important and preserved.
   vector<ResourceConversion> conversions;
 
-  // The order of `authorizations` must match the order of the operations in
-  // `accept.operations()`, as they are iterated through simultaneously.
+  // The order of `authorizations` must match the order of the operations and/or
+  // tasks in `accept.operations()` as they are iterated through simultaneously.
   CHECK_READY(_authorizations);
   list<Future<bool>> authorizations = _authorizations.get();
 
@@ -4663,6 +4670,7 @@ void Master::_accept(
     switch (operation.type()) {
       // The RESERVE operation allows a principal to reserve resources.
       case Offer::Operation::RESERVE: {
+        CHECK(!authorizations.empty());
         Future<bool> authorization = authorizations.front();
         authorizations.pop_front();
 
@@ -4738,6 +4746,7 @@ void Master::_accept(
 
       // The UNRESERVE operation allows a principal to unreserve resources.
       case Offer::Operation::UNRESERVE: {
+        CHECK(!authorizations.empty());
         Future<bool> authorization = authorizations.front();
         authorizations.pop_front();
 
@@ -4803,6 +4812,7 @@ void Master::_accept(
       }
 
       case Offer::Operation::CREATE: {
+        CHECK(!authorizations.empty());
         Future<bool> authorization = authorizations.front();
         authorizations.pop_front();
 
@@ -4880,6 +4890,7 @@ void Master::_accept(
       }
 
       case Offer::Operation::DESTROY: {
+        CHECK(!authorizations.empty());
         Future<bool> authorization = authorizations.front();
         authorizations.pop_front();
 
@@ -4973,6 +4984,7 @@ void Master::_accept(
       }
 
       case Offer::Operation::GROW_VOLUME: {
+        CHECK(!authorizations.empty());
         Future<bool> authorization = authorizations.front();
         authorizations.pop_front();
 
@@ -5055,6 +5067,7 @@ void Master::_accept(
       }
 
       case Offer::Operation::SHRINK_VOLUME: {
+        CHECK(!authorizations.empty());
         Future<bool> authorization = authorizations.front();
         authorizations.pop_front();
 
@@ -5138,6 +5151,7 @@ void Master::_accept(
 
       case Offer::Operation::LAUNCH: {
         foreach (const TaskInfo& task, operation.launch().task_infos()) {
+          CHECK(!authorizations.empty());
           Future<bool> authorization = authorizations.front();
           authorizations.pop_front();
 
@@ -5369,51 +5383,50 @@ void Master::_accept(
         // TODO(bmahler): Consider injecting some default (cpus, mem, disk)
         // resources when the framework omits the executor resources.
 
-        // See if there are any validation or authorization errors.
+        // See if there are any authorization or validation errors.
         // Note that we'll only report the first error we encounter
         // for the group.
         //
         // TODO(anindya_sinha): If task group uses shared resources, this
         // validation needs to be enhanced to accommodate multiple copies
         // of shared resources across tasks within the task group.
-        Option<Error> error = validation::task::group::validate(
-            taskGroup, executor, framework, slave, _offeredResources);
+        Option<Error> error;
+        Option<TaskStatus::Reason> reason;
 
-        Option<TaskStatus::Reason> reason = None();
+        // NOTE: We check for the authorization errors first and never break the
+        // loop to ensure that all authorization futures for this task group are
+        // iterated through.
+        foreach (const TaskInfo& task, taskGroup.tasks()) {
+          CHECK(!authorizations.empty());
+          Future<bool> authorization = authorizations.front();
+          authorizations.pop_front();
+
+          CHECK(!authorization.isDiscarded());
+
+          if (authorization.isFailed()) {
+            error = Error("Failed to authorize task"
+                          " '" + stringify(task.task_id()) + "'"
+                          ": " + authorization.failure());
+          } else if (!authorization.get()) {
+            string user = framework->info.user(); // Default user.
+            if (task.has_command() && task.command().has_user()) {
+              user = task.command().user();
+            }
+
+            error = Error("Task '" + stringify(task.task_id()) + "'"
+                          " is not authorized to launch as"
+                          " user '" + user + "'");
+          }
+        }
 
         if (error.isSome()) {
-          reason = TaskStatus::REASON_TASK_GROUP_INVALID;
+          reason = TaskStatus::REASON_TASK_GROUP_UNAUTHORIZED;
         } else {
-          foreach (const TaskInfo& task, taskGroup.tasks()) {
-            Future<bool> authorization = authorizations.front();
-            authorizations.pop_front();
+          error = validation::task::group::validate(
+              taskGroup, executor, framework, slave, _offeredResources);
 
-            CHECK(!authorization.isDiscarded());
-
-            if (authorization.isFailed()) {
-              error = Error("Failed to authorize task"
-                            " '" + stringify(task.task_id()) + "'"
-                            ": " + authorization.failure());
-
-              reason = TaskStatus::REASON_TASK_GROUP_UNAUTHORIZED;
-
-              break;
-            }
-
-            if (!authorization.get()) {
-              string user = framework->info.user(); // Default user.
-              if (task.has_command() && task.command().has_user()) {
-                user = task.command().user();
-              }
-
-              error = Error("Task '" + stringify(task.task_id()) + "'"
-                            " is not authorized to launch as"
-                            " user '" + user + "'");
-
-              reason = TaskStatus::REASON_TASK_GROUP_UNAUTHORIZED;
-
-              break;
-            }
+          if (error.isSome()) {
+            reason = TaskStatus::REASON_TASK_GROUP_INVALID;
           }
         }
 
@@ -5719,6 +5732,11 @@ void Master::_accept(
       }
     }
   }
+
+  CHECK(authorizations.empty())
+    << "Authorization results not processed: "
+    << stringify(
+           vector<Future<bool>>(authorizations.begin(), authorizations.end()));
 
   // Update the allocator based on the operations.
   if (!conversions.empty()) {
@@ -6451,6 +6469,16 @@ void Master::executorMessage(
     return;
   }
 
+  if (!framework->connected()) {
+    LOG(WARNING) << "Not forwarding executor message for executor '"
+                 << executorId << "' of framework " << frameworkId
+                 << " on agent " << *slave
+                 << " because the framework is disconnected";
+
+    metrics->invalid_executor_to_framework_messages++;
+    return;
+  }
+
   ExecutorToFrameworkMessage message;
   *message.mutable_slave_id() =
     std::move(*executorToFrameworkMessage.mutable_slave_id());
@@ -6534,10 +6562,6 @@ void Master::registerSlave(
     // without authentication.
     LOG(WARNING) << "Refusing registration of agent at " << from
                  << " because it is not authenticated";
-
-    ShutdownMessage message;
-    message.set_message("Agent is not authenticated");
-    send(from, message);
     return;
   }
 
@@ -6622,10 +6646,6 @@ void Master::_registerSlave(
     LOG(WARNING) << "Refusing registration of agent at " << pid
                  << " (" << slaveInfo.hostname() << ")"
                  << ": " << authorizationError.get();
-
-    ShutdownMessage message;
-    message.set_message(authorizationError.get());
-    send(pid, message);
 
     slaves.registering.erase(pid);
     return;
@@ -6870,10 +6890,6 @@ void Master::reregisterSlave(
     // reregister without authentication.
     LOG(WARNING) << "Refusing re-registration of agent at " << from
                  << " because it is not authenticated";
-
-    ShutdownMessage message;
-    message.set_message("Agent is not authenticated");
-    send(from, message);
     return;
   }
 
@@ -6987,10 +7003,6 @@ void Master::_reregisterSlave(
     LOG(WARNING) << "Refusing re-registration of agent " << slaveInfo.id()
                  << " at " << pid << " (" << slaveInfo.hostname() << ")"
                  << ": " << authorizationError.get();
-
-    ShutdownMessage message;
-    message.set_message(authorizationError.get());
-    send(pid, message);
 
     slaves.reregistering.erase(slaveInfo.id());
     return;
@@ -9549,7 +9561,7 @@ void Master::authenticate(const UPID& from, const UPID& pid)
   //       about this discrepancy via ping messages so that it can
   //       reregister.
 
-  authenticated.erase(pid);
+  bool erased = authenticated.erase(pid) > 0;
 
   if (authenticator.isNone()) {
     // The default authenticator is CRAM-MD5 rather than none.
@@ -9572,22 +9584,20 @@ void Master::authenticate(const UPID& from, const UPID& pid)
     return;
   }
 
+  // If a new authentication is occurring for a client that already
+  // has an authentication in progress, we discard the old one
+  // (since the client is no longer interested in it) and
+  // immediately proceed with the new authentication.
   if (authenticating.contains(pid)) {
-    LOG(INFO) << "Queuing up authentication request from " << pid
-              << " because authentication is still in progress";
+    authenticating.at(pid).discard();
+    authenticating.erase(pid);
 
-    // Try to cancel the in progress authentication by discarding the
-    // future.
-    authenticating[pid].discard();
-
-    // Retry after the current authenticator session finishes.
-    authenticating[pid]
-      .onAny(defer(self(), &Self::authenticate, from, pid));
-
-    return;
+    LOG(INFO) << "Re-authenticating " << pid << ";"
+              << " discarding outstanding authentication";
+  } else {
+    LOG(INFO) << "Authenticating " << pid
+              << (erased ? "; clearing previous authentication" : "");
   }
-
-  LOG(INFO) << "Authenticating " << pid;
 
   // Start authentication.
   const Future<Option<string>> future = authenticator.get()->authenticate(from);
@@ -9595,10 +9605,10 @@ void Master::authenticate(const UPID& from, const UPID& pid)
   // Save our state.
   authenticating[pid] = future;
 
-  future.onAny(defer(self(), &Self::_authenticate, pid, lambda::_1));
+  future.onAny(defer(self(), &Self::_authenticate, pid, future));
 
   // Don't wait for authentication to complete forever.
-  delay(Seconds(5),
+  delay(flags.authentication_v0_timeout,
         self(),
         &Self::authenticationTimeout,
         future);
@@ -9609,21 +9619,28 @@ void Master::_authenticate(
     const UPID& pid,
     const Future<Option<string>>& future)
 {
-  if (!future.isReady() || future->isNone()) {
-    const string& error = future.isReady()
-        ? "Refused authentication"
-        : (future.isFailed() ? future.failure() : "future discarded");
+  // Ignore stale authentication results (if the authentication
+  // future has been overwritten).
+  if (authenticating.get(pid) != future) {
+    LOG(INFO) << "Ignoring stale authentication result of " << pid;
+    return;
+  }
 
-    LOG(WARNING) << "Failed to authenticate " << pid
-                 << ": " << error;
-  } else {
+  if (future.isReady() && future->isSome()) {
     LOG(INFO) << "Successfully authenticated principal '" << future->get()
               << "' at " << pid;
 
     authenticated.put(pid, future->get());
+  } else if (future.isReady() && future->isNone()) {
+    LOG(INFO) << "Authentication of " << pid << " was unsuccessful:"
+              << " Invalid credentials";
+  } else if (future.isFailed()) {
+    LOG(WARNING) << "An error ocurred while attempting to authenticate " << pid
+                 << ": " << future.failure();
+  } else {
+    LOG(INFO) << "Authentication of " << pid << " was discarded";
   }
 
-  CHECK(authenticating.contains(pid));
   authenticating.erase(pid);
 }
 
@@ -10808,6 +10825,13 @@ void Master::updateTask(Task* task, const StatusUpdate& update)
     }
 
     task->set_state(latestState.getOrElse(status.state()));
+  }
+
+  // If this is a (health) check status update, always forward it to
+  // subscribers.
+  if (status.reason() == TaskStatus::REASON_TASK_CHECK_STATUS_UPDATED ||
+      status.reason() == TaskStatus::REASON_TASK_HEALTH_CHECK_STATUS_UPDATED) {
+    sendSubscribersUpdate = true;
   }
 
   // TODO(brenden): Consider wiping the `message` field?

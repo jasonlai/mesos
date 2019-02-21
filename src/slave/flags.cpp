@@ -349,14 +349,29 @@ mesos::internal::slave::Flags::Flags()
 
   add(&Flags::authentication_backoff_factor,
       "authentication_backoff_factor",
-      "After a failed authentication the agent picks a random amount of time\n"
-      "between `[0, b]`, where `b = authentication_backoff_factor`, to\n"
-      "authenticate with a new master. Subsequent retries are exponentially\n"
-      "backed off based on this interval (e.g., 1st retry uses a random\n"
-      "value between `[0, b * 2^1]`, 2nd retry between `[0, b * 2^2]`, 3rd\n"
-      "retry between `[0, b * 2^3]`, etc up to a maximum of " +
-          stringify(AUTHENTICATION_RETRY_INTERVAL_MAX),
+      "The agent will time out its authentication with the master based on\n"
+      "exponential backoff. The timeout will be randomly chosen within the\n"
+      "range `[min, min + factor*2^n]` where `n` is the number of failed\n"
+      "attempts. To tune these parameters, set the\n"
+      "`--authentication_timeout_[min|max|factor]` flags.\n",
       DEFAULT_AUTHENTICATION_BACKOFF_FACTOR);
+
+  add(&Flags::authentication_timeout_min,
+      "authentication_timeout_min",
+      "The minimum amount of time the agent waits before retrying\n"
+      "authenticating with the master. See `authentication_backoff_factor`\n"
+      "for more details. NOTE that since authentication retry cancels the\n"
+      "previous authentication request, one should consider what is the\n"
+      "normal authentication delay when setting this flag to prevent\n"
+      "premature retry.",
+      DEFAULT_AUTHENTICATION_TIMEOUT_MIN);
+
+  add(&Flags::authentication_timeout_max,
+      "authentication_timeout_max",
+      "The maximum amount of time the agent waits before retrying\n"
+      "authenticating with the master. See `authentication_backoff_factor`\n"
+      "for more details.",
+      DEFAULT_AUTHENTICATION_TIMEOUT_MAX);
 
   add(&Flags::executor_environment_variables,
       "executor_environment_variables",
@@ -1153,6 +1168,12 @@ mesos::internal::slave::Flags::Flags()
       "network that containers launched in Mesos agent can connect to,\n"
       "the operator should install a network configuration file in JSON\n"
       "format in the specified directory.");
+
+  add(&Flags::network_cni_root_dir_persist,
+      "network_cni_root_dir_persist",
+      "This setting controls whether the CNI root directory\n"
+      "persists across reboot or not.",
+      false);
 
   add(&Flags::container_disk_watch_interval,
       "container_disk_watch_interval",

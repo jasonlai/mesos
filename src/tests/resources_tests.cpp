@@ -31,6 +31,7 @@
 
 #include <mesos/v1/resources.hpp>
 
+#include "common/resource_quantities.hpp"
 #include "common/resources_utils.hpp"
 
 #include "internal/evolve.hpp"
@@ -56,6 +57,8 @@ using google::protobuf::RepeatedPtrField;
 using mesos::internal::evolve;
 
 using mesos::internal::protobuf::createLabel;
+
+using mesos::internal::ResourceQuantities;
 
 namespace mesos {
 namespace internal {
@@ -1927,16 +1930,143 @@ TEST(ResourcesTest, PrecisionRounding)
 }
 
 
-TEST(ResourcesTest, PrecisionVerySmallValue)
+TEST(ResourcesTest, VerySmallValue)
 {
-  Resources r1 = Resources::parse("cpus:2;mem:1024").get();
-  Resources r2 = Resources::parse("cpus:0.00001;mem:1").get();
+  Try<Resources> resources = Resources::parse("cpus:0.00001");
+  EXPECT_ERROR(resources);
+}
 
-  Resources r3 = r1 - (r1 - r2);
-  EXPECT_TRUE(r3.contains(r2));
 
-  Resources r4 = Resources::parse("cpus:0;mem:1").get();
-  EXPECT_EQ(r2, r4);
+TEST(ResourcesTest, AbsentResources)
+{
+  Try<Resources> resources = Resources::parse("gpus:0");
+  ASSERT_SOME(resources);
+
+  EXPECT_EQ(0u, resources->size());
+}
+
+
+TEST(ResourcesTest, isScalarQuantity)
+{
+  Resources scalarQuantity1 = Resources::parse("cpus:1").get();
+  EXPECT_TRUE(Resources::isScalarQuantity(scalarQuantity1));
+
+  Resources scalarQuantity2 = Resources::parse("cpus:1;mem:1").get();
+  EXPECT_TRUE(Resources::isScalarQuantity(scalarQuantity2));
+
+  Resources range = Resources::parse("ports", "[1-16000]", "*").get();
+  EXPECT_FALSE(Resources::isScalarQuantity(range));
+
+  Resources set = Resources::parse("names:{foo,bar}").get();
+  EXPECT_FALSE(Resources::isScalarQuantity(set));
+
+  Resources reserved = createReservedResource(
+      "cpus", "1", createDynamicReservationInfo("role", "principal"));
+  EXPECT_FALSE(Resources::isScalarQuantity(reserved));
+
+  Resources disk = createDiskResource("10", "role1", "1", "path");
+  EXPECT_FALSE(Resources::isScalarQuantity(disk));
+
+  Resources allocated = Resources::parse("cpus:1;mem:512").get();
+  allocated.allocate("role");
+  EXPECT_FALSE(Resources::isScalarQuantity(allocated));
+
+  Resource revocable = Resources::parse("cpus", "1", "*").get();
+  revocable.mutable_revocable();
+  EXPECT_FALSE(Resources::isScalarQuantity(revocable));
+}
+
+
+TEST(ResourcesTest, ContainsResourceQuantities)
+{
+  auto resources = [](const string& s) {
+    return CHECK_NOTERROR(Resources::parse(s));
+  };
+
+  auto quantities = [](const string& s) {
+      return CHECK_NOTERROR(ResourceQuantities::fromString(s));
+  };
+
+  // Empty case tests.
+
+  Resources emptyResources;
+  ResourceQuantities emptyQuantities;
+
+  EXPECT_TRUE(emptyResources.contains(emptyQuantities));
+  EXPECT_FALSE(emptyResources.contains(quantities("cpus:1")));
+  EXPECT_TRUE(resources("cpus:1").contains(emptyQuantities));
+
+  // Single scalar resource tests.
+
+  EXPECT_TRUE(resources("cpus:2").contains(quantities("cpus:1")));
+
+  EXPECT_TRUE(resources("cpus:1").contains(quantities("cpus:1")));
+
+  EXPECT_FALSE(resources("cpus:0.5").contains(quantities("cpus:1")));
+
+  // Single range resource tests.
+
+  EXPECT_TRUE(resources("ports:[1-3]").contains(quantities("ports:2")));
+
+  EXPECT_TRUE(resources("ports:[1-2]").contains(quantities("ports:2")));
+
+  EXPECT_FALSE(resources("ports:[1-1]").contains(quantities("ports:2")));
+
+  // Single set resources tests.
+
+  EXPECT_TRUE(resources("features:{a,b,c}").contains(quantities("features:2")));
+
+  EXPECT_TRUE(resources("features:{a,b}").contains(quantities("features:2")));
+
+  EXPECT_FALSE(resources("features:{a}").contains(quantities("features:2")));
+
+  // Multiple resources tests.
+
+  EXPECT_TRUE(resources("cpus:3;ports:[1-3];features:{a,b,c};mem:10")
+                .contains(quantities("cpus:3;ports:3;features:3")));
+
+  EXPECT_TRUE(resources("cpus:3;ports:[1-3];features:{a,b,c}")
+                .contains(quantities("cpus:3;ports:3;features:3")));
+
+  EXPECT_FALSE(resources("cpus:1;ports:[1-3];features:{a,b,c}")
+                 .contains(quantities("cpus:3;ports:3;features:3")));
+
+  EXPECT_FALSE(resources("cpus:3;ports:[1-3]")
+                 .contains(quantities("cpus:3;ports:3;features:3")));
+
+  // Duplicate names.
+
+  EXPECT_FALSE(resources("cpus(role1):2").contains(quantities("cpus:3")));
+
+  EXPECT_TRUE(resources("cpus(role1):2;cpus:1").contains(quantities("cpus:3")));
+
+  Resource::ReservationInfo reservation =
+    createDynamicReservationInfo("role", "principal");
+  Resources resources_ = createReservedResource("ports", "[1-10]", reservation);
+
+  EXPECT_FALSE(resources_.contains(quantities("ports:12")));
+
+  resources_ +=
+    CHECK_NOTERROR(Resources::parse("ports:[20-25]")); // 15 ports in total.
+
+  EXPECT_TRUE(resources_.contains(quantities("ports:12")));
+
+  resources_ = createPersistentVolume(
+      Megabytes(64),
+      "role1",
+      "id1",
+      "path1",
+      None(),
+      None(),
+      "principal1",
+      true); // Shared.
+
+  EXPECT_FALSE(resources_.contains(quantities("disk:128")));
+
+  resources_ +=
+    CHECK_NOTERROR(Resources::parse("disk:64")); // 128M disk in total.
+
+  EXPECT_TRUE(resources_.contains(quantities("disk:128")));
 }
 
 
@@ -2603,19 +2733,14 @@ TEST(ResourcesOperationTest, StrippedResourcesVolume)
   Resources stripped = volume.createStrippedScalarQuantity();
 
   EXPECT_TRUE(stripped.persistentVolumes().empty());
+  EXPECT_TRUE(stripped.reserved().empty());
   EXPECT_EQ(Megabytes(200), stripped.disk().get());
-
-  // `createStrippedScalarQuantity` doesn't remove the `role` from a
-  // reserved resource.
-  EXPECT_FALSE(stripped.reserved("role").empty());
 
   Resource strippedVolume = *(stripped.begin());
 
   ASSERT_EQ(Value::SCALAR, strippedVolume.type());
   EXPECT_DOUBLE_EQ(200, strippedVolume.scalar().value());
-  EXPECT_EQ("role", Resources::reservationRole(strippedVolume));
   EXPECT_EQ("disk", strippedVolume.name());
-  EXPECT_EQ(1, strippedVolume.reservations_size());
   EXPECT_FALSE(strippedVolume.has_disk());
   EXPECT_FALSE(Resources::isPersistentVolume(strippedVolume));
 }
@@ -2644,13 +2769,11 @@ TEST(ResourcesOperationTest, StrippedResourcesReserved)
 
   Resources stripped = dynamicallyReserved.createStrippedScalarQuantity();
 
-  EXPECT_FALSE(stripped.reserved("role").empty());
+  EXPECT_TRUE(stripped.reserved("role").empty());
 
   foreach (const Resource& resource, stripped) {
-    EXPECT_EQ("role", Resources::reservationRole(resource));
-    EXPECT_FALSE(resource.reservations().empty());
     EXPECT_FALSE(Resources::isDynamicallyReserved(resource));
-    EXPECT_FALSE(Resources::isUnreserved(resource));
+    EXPECT_TRUE(Resources::isUnreserved(resource));
   }
 }
 
@@ -2677,6 +2800,19 @@ TEST(ResourcesOperationTest, StrippedResourcesNonScalar)
   Resources names = Resources::parse("names:{foo,bar}").get();
 
   EXPECT_TRUE(names.createStrippedScalarQuantity().empty());
+}
+
+
+TEST(ResourceOperationTest, StrippedResourcesRevocable)
+{
+  Resource plain = Resources::parse("cpus", "1", "*").get();
+
+  Resource revocable = plain;
+  revocable.mutable_revocable();
+
+  Resources stripped = Resources(revocable).createStrippedScalarQuantity();
+
+  EXPECT_EQ(Resources(plain), stripped);
 }
 
 

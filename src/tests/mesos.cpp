@@ -161,26 +161,29 @@ slave::Flags MesosTest::CreateSlaveFlags()
   slave::Flags flags;
 
   // Create a temporary work directory (removed by Environment).
-  Try<string> directory = environment->mkdtemp();
-  CHECK_SOME(directory) << "Failed to create temporary directory";
-  flags.work_dir = directory.get();
+  Try<string> workDir = environment->mkdtemp();
+  CHECK_SOME(workDir) << "Failed to create temporary directory";
+  flags.work_dir = workDir.get();
 
   // Create a temporary runtime directory (removed by Environment).
-  directory = environment->mkdtemp();
-  CHECK_SOME(directory) << "Failed to create temporary directory";
-  flags.runtime_dir = directory.get();
+  Try<string> runtimeDir = environment->mkdtemp();
+  CHECK_SOME(runtimeDir) << "Failed to create temporary directory";
+  flags.runtime_dir = runtimeDir.get();
 
-  flags.fetcher_cache_dir = path::join(directory.get(), "fetch");
+  Try<string> agentDir = os::mkdtemp(path::join(sandbox.get(), "XXXXXX"));
+  CHECK_SOME(agentDir) << "Failed to create temporary directory";
+
+  flags.fetcher_cache_dir = path::join(agentDir.get(), "fetch");
 
   flags.launcher_dir = getLauncherDir();
 
-  flags.appc_store_dir = path::join(directory.get(), "store", "appc");
+  flags.appc_store_dir = path::join(agentDir.get(), "store", "appc");
 
-  flags.docker_store_dir = path::join(directory.get(), "store", "docker");
+  flags.docker_store_dir = path::join(agentDir.get(), "store", "docker");
 
   {
     // Create a default credential file for master/agent authentication.
-    const string& path = path::join(directory.get(), "credential");
+    const string& path = path::join(agentDir.get(), "credential");
 
     Try<int_fd> fd = os::open(
         path,
@@ -214,7 +217,7 @@ slave::Flags MesosTest::CreateSlaveFlags()
 
   {
     // Create a secret key for executor authentication.
-    const string path = path::join(directory.get(), "jwt_secret_key");
+    const string path = path::join(agentDir.get(), "jwt_secret_key");
 
     Try<int_fd> fd = os::open(
         path,
@@ -240,7 +243,7 @@ slave::Flags MesosTest::CreateSlaveFlags()
 
   {
     // Create a default HTTP credentials file.
-    const string& path = path::join(directory.get(), "http_credentials");
+    const string& path = path::join(agentDir.get(), "http_credentials");
 
     Try<int_fd> fd = os::open(
         path,

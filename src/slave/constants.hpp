@@ -65,12 +65,17 @@ constexpr Duration DEFAULT_REGISTRATION_BACKOFF_FACTOR = Seconds(1);
 // recovery and when it times out slave re-registration.
 constexpr Duration REGISTER_RETRY_INTERVAL_MAX = Minutes(1);
 
-// The maximum interval the slave waits before retrying authentication.
-constexpr Duration AUTHENTICATION_RETRY_INTERVAL_MAX = Minutes(1);
-
-// Default backoff interval used by the slave to wait after failed
-// authentication.
+// Default value for `--authentication_backoff_factor`. The backoff interval
+// factor affects the agent timeout interval after failed authentications.
 constexpr Duration DEFAULT_AUTHENTICATION_BACKOFF_FACTOR = Seconds(1);
+
+// Default value for `--authentication_timeout_min`. The minimum timeout
+// interval the agent waits before retrying authentication.
+constexpr Duration DEFAULT_AUTHENTICATION_TIMEOUT_MIN = Seconds(5);
+
+// Default value for `--authentication_timeout_max`. The maximum timeout
+// interval the agent waits before retrying authentication.
+constexpr Duration DEFAULT_AUTHENTICATION_TIMEOUT_MAX = Minutes(1);
 
 constexpr Duration GC_DELAY = Weeks(1);
 constexpr Duration DISK_WATCH_INTERVAL = Minutes(1);
@@ -180,9 +185,12 @@ Duration DEFAULT_MASTER_PING_TIMEOUT();
 // Name of the executable for default executor.
 #ifdef __WINDOWS__
 constexpr char MESOS_DEFAULT_EXECUTOR[] = "mesos-default-executor.exe";
+constexpr char MESOS_EXECUTOR[] = "mesos-executor.exe";
 #else
 constexpr char MESOS_DEFAULT_EXECUTOR[] = "mesos-default-executor";
+constexpr char MESOS_EXECUTOR[] = "mesos-executor";
 #endif // __WINDOWS__
+
 
 // Virtual path on which agent logs are mounted in `/files/` endpoint.
 constexpr char AGENT_LOG_VIRTUAL_PATH[] = "/slave/log";

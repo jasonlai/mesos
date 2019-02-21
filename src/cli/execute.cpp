@@ -356,6 +356,11 @@ public:
         "and 'protobuf' are valid choices.",
         "protobuf");
 
+    add(&Flags::tty,
+        "tty",
+        "Attach a TTY to the task being launched",
+        false);
+
     add(&Flags::partition_aware,
         "partition_aware",
         "Enable partition-awareness for the framework.",
@@ -390,6 +395,7 @@ public:
   Option<string> secret;
   string content_type;
   bool partition_aware;
+  bool tty;
 };
 
 
@@ -787,7 +793,8 @@ static Result<ContainerInfo> getContainerInfo(
     const Option<string>& dockerImage,
     const Option<CapabilityInfo>& effective_capabilities,
     const Option<CapabilityInfo>& bounding_capabilities,
-    const Option<RLimitInfo>& rlimits)
+    const Option<RLimitInfo>& rlimits,
+    const bool tty)
 {
   if (containerizer.empty()) {
     return None();
@@ -803,7 +810,8 @@ static Result<ContainerInfo> getContainerInfo(
 
   // Mesos containerizer supports 'appc' and 'docker' images.
   if (containerizer == "mesos") {
-    if (appcImage.isNone() &&
+    if (!tty &&
+        appcImage.isNone() &&
         dockerImage.isNone() &&
         effective_capabilities.isNone() &&
         bounding_capabilities.isNone() &&
@@ -870,6 +878,10 @@ static Result<ContainerInfo> getContainerInfo(
       containerInfo.mutable_rlimit_info()->CopyFrom(rlimits.get());
     }
 
+    if (tty) {
+      containerInfo.mutable_tty_info();
+    }
+
     return containerInfo;
   } else if (containerizer == "docker") {
     // 'docker' containerizer only supports 'docker' images.
@@ -890,6 +902,10 @@ static Result<ContainerInfo> getContainerInfo(
             ContainerInfo::DockerInfo::USER);
         containerInfo.add_network_infos()->set_name(tokens.front());
       }
+    }
+
+    if (tty) {
+      return Error("'Docker' containerizer does not allow attaching a TTY");
     }
 
     return containerInfo;
@@ -1190,7 +1206,8 @@ int main(int argc, char** argv)
         dockerImage,
         flags.effective_capabilities,
         flags.bounding_capabilities,
-        flags.rlimits);
+        flags.rlimits,
+        flags.tty);
 
     if (containerInfo.isError()){
       EXIT(EXIT_FAILURE) << containerInfo.error();

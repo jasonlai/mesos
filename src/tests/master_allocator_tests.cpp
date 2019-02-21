@@ -164,7 +164,7 @@ TYPED_TEST(MasterAllocatorTest, SingleFramework)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = this->StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -214,7 +214,7 @@ TYPED_TEST(MasterAllocatorTest, ResourcesUnused)
 
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = this->StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -324,7 +324,7 @@ TYPED_TEST(MasterAllocatorTest, OutOfOrderDispatch)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = this->StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -455,7 +455,7 @@ TYPED_TEST(MasterAllocatorTest, SchedulerFailover)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = this->StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -588,7 +588,7 @@ TYPED_TEST(MasterAllocatorTest, FrameworkExited)
 
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   masterFlags.allocation_interval = Milliseconds(50);
@@ -749,7 +749,7 @@ TYPED_TEST(MasterAllocatorTest, SlaveLost)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = this->StartMaster(&allocator);
   ASSERT_SOME(master);
@@ -873,7 +873,7 @@ TYPED_TEST(MasterAllocatorTest, SlaveAdded)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   masterFlags.allocation_interval = Milliseconds(50);
@@ -969,7 +969,7 @@ TYPED_TEST(MasterAllocatorTest, TaskFinished)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   masterFlags.allocation_interval = Milliseconds(50);
@@ -1075,7 +1075,7 @@ TYPED_TEST(MasterAllocatorTest, CpusOnlyOfferedAndTaskLaunched)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   masterFlags.allocation_interval = Milliseconds(50);
@@ -1158,7 +1158,7 @@ TYPED_TEST(MasterAllocatorTest, MemoryOnlyOfferedAndTaskLaunched)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   masterFlags.allocation_interval = Milliseconds(50);
@@ -1235,6 +1235,112 @@ TYPED_TEST(MasterAllocatorTest, MemoryOnlyOfferedAndTaskLaunched)
 }
 
 
+// This test verifies that the allocator honors the `min_allocatable_resources`
+// flag and only offers resources that are more than at least one of the
+// specified resources quantities.
+TYPED_TEST(MasterAllocatorTest, MinAllocatableResources)
+{
+  Clock::pause();
+
+  master::Flags masterFlags = this->CreateMasterFlags();
+  masterFlags.min_allocatable_resources =
+    "cpus:1;mem:100|disk:100|cpus:1;ports:10";
+
+  TestAllocator<TypeParam> allocator;
+
+  Try<Owned<cluster::Master>> master =
+    this->StartMaster(&allocator, masterFlags);
+  ASSERT_SOME(master);
+
+  Owned<MasterDetector> detector = master.get()->createDetector();
+
+  // Prevent agents from destruction until end of test.
+  vector<Owned<cluster::Slave>> slaves;
+
+  // Add agents with non-allocatable resources.
+  vector<string> nonAllocatableAgentResources = {
+    "cpus:1;mem:10;disk:10;ports:[1-5]",
+    "cpus:0.5;mem:100;disk:10;ports:[6-10]",
+    "cpus:0.5;mem:200;disk:10;ports:[11-15]",
+    "cpus:0.5;mem:10;disk:50;ports:[16-20]"};
+
+  foreach (const string& resourcesString, nonAllocatableAgentResources) {
+    Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+      FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
+
+    slave::Flags flags = this->CreateSlaveFlags();
+    flags.resources = resourcesString;
+
+    Try<Owned<cluster::Slave>> slave = this->StartSlave(detector.get(), flags);
+    ASSERT_SOME(slave);
+
+    // Advance the clock to trigger agent registration.
+    Clock::advance(flags.registration_backoff_factor);
+    Clock::settle();
+
+    AWAIT_READY(slaveRegisteredMessage);
+
+    slaves.push_back(slave.get());
+  }
+
+  // Add agents with allocatable resources.
+  vector<string> allocatableAgentResources = {
+    "cpus:1;mem:100;disk:0;ports:[1-5]",    // contains `cpus:1;mem:100`
+    "cpus:0.5;mem:10;disk:100;ports:[1-5]", // contains `disk:100`
+    "cpus:1;mem:100;disk:50",               // contains `cpus:1;mem:100`
+    "cpus:1;mem:10;disk:10;ports:[1-10]",   // contains `cpus:1;ports:10`
+  };
+
+  hashset<SlaveID> allocatableAgents;
+  foreach (const string& resourcesString, allocatableAgentResources) {
+    Future<SlaveRegisteredMessage> slaveRegisteredMessage =
+      FUTURE_PROTOBUF(SlaveRegisteredMessage(), _, _);
+
+    slave::Flags flags = this->CreateSlaveFlags();
+    flags.resources = resourcesString;
+
+    Try<Owned<cluster::Slave>> slave = this->StartSlave(detector.get(), flags);
+    ASSERT_SOME(slave);
+
+    // Advance the clock to trigger agent registration.
+    Clock::advance(flags.registration_backoff_factor);
+    Clock::settle();
+
+    AWAIT_READY(slaveRegisteredMessage);
+
+    slaves.push_back(slave.get());
+    allocatableAgents.insert(slaveRegisteredMessage->slave_id());
+  }
+
+  // Add a framework. This will trigger an event-driven allocation.
+  // Since it is the only framework, it will get all offers.
+  MockScheduler sched;
+  MesosSchedulerDriver driver(
+      &sched, DEFAULT_FRAMEWORK_INFO, master.get()->pid, DEFAULT_CREDENTIAL);
+
+  EXPECT_CALL(sched, registered(_, _, _));
+
+  Future<vector<Offer>> offers;
+  EXPECT_CALL(sched, resourceOffers(&driver, _))
+    .WillOnce(FutureArg<1>(&offers));
+
+  driver.start();
+
+  AWAIT_READY(offers);
+
+  // All allocatable agents are offered. None of the non-allocatable
+  // agents should be offered.
+  EXPECT_EQ(offers->size(), allocatableAgents.size());
+
+  foreach (const Offer& offer, offers.get()) {
+    EXPECT_TRUE(allocatableAgents.count(offer.slave_id()) != 0);
+  }
+
+  driver.stop();
+  driver.join();
+}
+
+
 // Checks that changes to the whitelist are sent to the allocator.
 // The allocator whitelisting is tested in the allocator unit tests.
 // TODO(bmahler): Move this to a whitelist unit test.
@@ -1254,7 +1360,7 @@ TYPED_TEST(MasterAllocatorTest, Whitelist)
 
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _, _));
 
   Future<Nothing> updateWhitelist1;
   EXPECT_CALL(allocator, updateWhitelist(Option<hashset<string>>(hosts)))
@@ -1293,7 +1399,7 @@ TYPED_TEST(MasterAllocatorTest, RoleTest)
 {
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   masterFlags.roles = Some("role2");
@@ -1388,7 +1494,7 @@ TYPED_TEST(MasterAllocatorTest, FrameworkReregistersFirst)
   {
     TestAllocator<TypeParam> allocator;
 
-    EXPECT_CALL(allocator, initialize(_, _, _, _, _, _));
+    EXPECT_CALL(allocator, initialize(_, _, _, _, _, _, _));
 
     Try<Owned<cluster::Master>> master = this->StartMaster(
         &allocator, masterFlags);
@@ -1446,7 +1552,7 @@ TYPED_TEST(MasterAllocatorTest, FrameworkReregistersFirst)
   {
     TestAllocator<TypeParam> allocator2;
 
-    EXPECT_CALL(allocator2, initialize(_, _, _, _, _, _));
+    EXPECT_CALL(allocator2, initialize(_, _, _, _, _, _, _));
 
     Future<Nothing> addFramework;
     EXPECT_CALL(allocator2, addFramework(_, _, _, _, _))
@@ -1514,7 +1620,7 @@ TYPED_TEST(MasterAllocatorTest, SlaveReregistersFirst)
   {
     TestAllocator<TypeParam> allocator;
 
-    EXPECT_CALL(allocator, initialize(_, _, _, _, _, _));
+    EXPECT_CALL(allocator, initialize(_, _, _, _, _, _, _));
 
     Try<Owned<cluster::Master>> master = this->StartMaster(&allocator);
 
@@ -1573,7 +1679,7 @@ TYPED_TEST(MasterAllocatorTest, SlaveReregistersFirst)
   {
     TestAllocator<TypeParam> allocator2;
 
-    EXPECT_CALL(allocator2, initialize(_, _, _, _, _, _));
+    EXPECT_CALL(allocator2, initialize(_, _, _, _, _, _, _));
 
     Future<Nothing> addSlave;
     EXPECT_CALL(allocator2, addSlave(_, _, _, _, _, _))
@@ -1640,7 +1746,7 @@ TYPED_TEST(MasterAllocatorTest, RebalancedForUpdatedWeights)
 
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _, _));
 
   // Start Mesos master.
   master::Flags masterFlags = this->CreateMasterFlags();
@@ -1834,7 +1940,7 @@ TYPED_TEST(MasterAllocatorTest, NestedRoles)
 
   TestAllocator<TypeParam> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _, _));
 
   master::Flags masterFlags = this->CreateMasterFlags();
   Try<Owned<cluster::Master>> master =

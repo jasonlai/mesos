@@ -307,19 +307,25 @@ Future<Option<ContainerLaunchInfo>> IOSwitchboard::_prepare(
     const ContainerConfig& containerConfig,
     const ContainerIO& loggerIO)
 {
+  bool requiresServer = IOSwitchboard::requiresServer(containerConfig);
+
   // On windows, we do not yet support running an io switchboard
   // server, so we must error out if it is required.
 #ifdef __WINDOWS__
-  if (IOSwitchboard::requiresServer(containerConfig)) {
+  if (requiresServer) {
       return Failure(
           "IO Switchboard server is not supported on windows");
   }
 #endif
 
+  LOG(INFO) << "Container logger module finished preparing container "
+            << containerId << "; IOSwitchboard server is "
+            << (requiresServer ? "" : "not") << " required";
+
   bool hasTTY = containerConfig.has_container_info() &&
                 containerConfig.container_info().has_tty_info();
 
-  if (!IOSwitchboard::requiresServer(containerConfig)) {
+  if (!requiresServer) {
     CHECK(!containerIOs.contains(containerId));
     containerIOs[containerId] = loggerIO;
 
@@ -442,6 +448,13 @@ Future<Option<ContainerLaunchInfo>> IOSwitchboard::_prepare(
     containerIO.err = containerIO.in;
 
     launchInfo.set_tty_slave_path(slavePath.get());
+
+    // The command executor requires the `tty_slave_path`
+    // to also be passed as a command line argument.
+    if (containerConfig.has_task_info()) {
+      launchInfo.mutable_command()->add_arguments(
+            "--tty_slave_path=" + slavePath.get());
+    }
   } else {
     Try<std::array<int_fd, 2>> infds_ = os::pipe();
     if (infds_.isError()) {
@@ -589,10 +602,8 @@ Future<Option<ContainerLaunchInfo>> IOSwitchboard::_prepare(
       environment,
       None(),
       parentHooks,
-      {Subprocess::ChildHook::SETSID(),
-       Subprocess::ChildHook::UNSET_CLOEXEC(stdinToFd),
-       Subprocess::ChildHook::UNSET_CLOEXEC(stdoutFromFd),
-       Subprocess::ChildHook::UNSET_CLOEXEC(stderrFromFd)});
+      {Subprocess::ChildHook::SETSID()},
+      {stdinToFd, stdoutFromFd, stderrFromFd});
 
   if (child.isError()) {
     close(openedFds);
@@ -808,6 +819,23 @@ Future<Nothing> IOSwitchboard::cleanup(
                   << " is being destroyed";
 
         os::kill(pid.get(), SIGTERM);
+
+        Clock::timer(Seconds(60), [pid, status, containerId]() {
+          if (status.isPending()) {
+            // If we are here, something really bad must have happened for I/O
+            // switchboard server to not exit after SIGTERM has been sent. We
+            // have seen this happen due to FD leak (see MESOS-9502). We do a
+            // SIGKILL here as a safeguard so that switchboard server forcefully
+            // exits and causes this cleanup feature to be completed, thus
+            // unblocking the container's cleanup.
+            LOG(ERROR) << "Sending SIGKILL to I/O switchboard server (pid: "
+                       << pid.get() << ") for container " << containerId
+                       << " since the I/O switchboard server did not terminate "
+                       << "60 seconds after SIGTERM was sent to it";
+
+            os::kill(pid.get(), SIGKILL);
+          }
+        });
       }
     });
   }
@@ -1003,6 +1031,9 @@ private:
   // switchboard.
   Option<Error> validate(const agent::Call::AttachContainerInput& call);
 
+  // Handle acknowledgment for `ATTACH_CONTAINER_INPUT` call.
+  Future<http::Response> acknowledgeContainerInputResponse();
+
   // Handle `ATTACH_CONTAINER_INPUT` calls.
   Future<http::Response> attachContainerInput(
       const Owned<recordio::Reader<agent::Call>>& reader);
@@ -1028,10 +1059,15 @@ private:
   bool waitForConnection;
   Option<Duration> heartbeatInterval;
   bool inputConnected;
-  bool redirectFinished;  // Set when both stdout and stderr redirects finish.
+  // Each time the agent receives a response for `ATTACH_CONTAINER_INPUT`
+  // request it sends an acknowledgment. This counter is used to delay
+  // IOSwitchboard termination until all acknowledgments are received.
+  size_t numPendingAcknowledgments;
   Future<unix::Socket> accept;
   Promise<Nothing> promise;
   Promise<Nothing> startRedirect;
+  // Set when both stdout and stderr redirects finish.
+  Promise<http::Response> redirectFinished;
   // The following must be a `std::list`
   // for proper erase semantics later on.
   list<HttpConnection> outputConnections;
@@ -1163,7 +1199,7 @@ IOSwitchboardServerProcess::IOSwitchboardServerProcess(
     waitForConnection(_waitForConnection),
     heartbeatInterval(_heartbeatInterval),
     inputConnected(false),
-    redirectFinished(false) {}
+    numPendingAcknowledgments(0) {}
 
 
 Future<Nothing> IOSwitchboardServerProcess::run()
@@ -1220,11 +1256,12 @@ Future<Nothing> IOSwitchboardServerProcess::run()
       // containers with this behavior and we will exit out of the
       // switchboard process early.
       //
-      // If our IO redirects are finished and there is an input connected,
-      // then we postpone our termination until either a container closes
-      // its `stdin` or a client closes the input connection so that we can
-      // guarantee returning a http response for `ATTACH_CONTAINER_INPUT`
-      // request before terminating ourselves.
+      // If our IO redirects are finished and there are pending
+      // acknowledgments for `ATTACH_CONTAINER_INPUT` requests, then
+      // we set `redirectFinished` promise which triggers a callback for
+      // `attachContainerInput()`. This callback returns a final `HTTP 200`
+      // response to the client, even if the client has not yet sent the EOF
+      // message.
       //
       // NOTE: We always call `terminate()` with `false` to ensure
       // that our event queue is drained before actually terminating.
@@ -1255,9 +1292,9 @@ Future<Nothing> IOSwitchboardServerProcess::run()
 
       collect(stdoutRedirect, stderrRedirect)
         .then(defer(self(), [this]() {
-          redirectFinished = true;
-
-          if (!inputConnected) {
+          if (numPendingAcknowledgments > 0) {
+            redirectFinished.set(http::OK());
+          } else {
             terminate(self(), false);
           }
           return Nothing();
@@ -1364,6 +1401,10 @@ Future<http::Response> IOSwitchboardServerProcess::handler(
     const http::Request& request)
 {
   CHECK_EQ("POST", request.method);
+
+  if (request.url.path == "/acknowledge_container_input_response") {
+    return acknowledgeContainerInputResponse();
+  }
 
   Option<string> contentType_ = request.headers.get("Content-Type");
   CHECK_SOME(contentType_);
@@ -1591,9 +1632,30 @@ Option<Error> IOSwitchboardServerProcess::validate(
 }
 
 
+Future<http::Response>
+IOSwitchboardServerProcess::acknowledgeContainerInputResponse()
+{
+  // Check if this is an acknowledgment sent by the agent. This acknowledgment
+  // means that response for `ATTACH_CONTAINER_INPUT` call has been received by
+  // the agent.
+  CHECK_GT(numPendingAcknowledgments, 0u);
+  if (--numPendingAcknowledgments == 0) {
+    // If IO redirects are finished or writing to `stdin` failed we want to
+    // terminate ourselves (after flushing any outstanding messages from our
+    // message queue).
+    if (!redirectFinished.future().isPending() || failure.isSome()) {
+      terminate(self(), false);
+    }
+  }
+  return http::OK();
+}
+
+
 Future<http::Response> IOSwitchboardServerProcess::attachContainerInput(
     const Owned<recordio::Reader<agent::Call>>& reader)
 {
+  ++numPendingAcknowledgments;
+
   // Only allow a single input connection at a time.
   if (inputConnected) {
     return http::Conflict("Multiple input connections are not allowed");
@@ -1607,7 +1669,7 @@ Future<http::Response> IOSwitchboardServerProcess::attachContainerInput(
 
   // Loop through each record and process it. Return a proper
   // response once the last record has been fully processed.
-  return loop(
+  auto readLoop = loop(
       self(),
       [=]() {
         return reader->read();
@@ -1698,22 +1760,45 @@ Future<http::Response> IOSwitchboardServerProcess::attachContainerInput(
             UNREACHABLE();
           }
         }
-      })
-    // We explicitly specify the return type to avoid a type deduction
-    // issue in some versions of clang. See MESOS-2943.
-    .then(defer(self(), [=](const http::Response& response) -> http::Response {
-      // Reset `inputConnected` to allow future input connections.
-      inputConnected = false;
+      });
 
-      // If IO redirects are finished or writing to `stdin` failed we want
-      // to terminate ourselves (after flushing any outstanding messages
-      // from our message queue).
-      if (redirectFinished || failure.isSome()) {
-        terminate(self(), false);
-      }
+  // We create a new promise, which is transitioned to `READY` when either
+  // the read loop finishes or IO redirects finish. Once this promise is set,
+  // we return a final response to the client.
+  //
+  // We use `defer(self(), ...)` to use this process as a synchronization point
+  // when changing state of the promise.
+  Owned<Promise<http::Response>> promise(new Promise<http::Response>());
 
-      return response;
-    }));
+  readLoop.onAny(
+      defer(self(), [promise](const Future<http::Response>& response) {
+        promise->set(response);
+      }));
+
+  // Since IOSwitchboard might receive an acknowledgment for the
+  // `ATTACH_CONTAINER_INPUT` request before reading a final message from
+  // the corresponding connection, we need to give IOSwitchboard a chance to
+  // read the final message. Otherwise, the agent might get `HTTP 500`
+  // "broken pipe" while attempting to write the final message.
+  redirectFinished.future().onAny(
+      defer(self(), [=](const Future<http::Response>& response) {
+        // TODO(abudnik): Ideally, we would have used `process::delay()` to
+        // delay a dispatch of the lambda to this process.
+        after(Seconds(1))
+          .onAny(defer(self(), [promise, response](const Future<Nothing>&) {
+            promise->set(response);
+          }));
+      }));
+
+  // We explicitly specify the return type to avoid a type deduction
+  // issue in some versions of clang. See MESOS-2943.
+  return promise->future().then(
+      defer(self(), [=](const http::Response& response) -> http::Response {
+        // Reset `inputConnected` to allow future input connections.
+        inputConnected = false;
+
+        return response;
+      }));
 }
 
 

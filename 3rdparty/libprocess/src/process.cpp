@@ -790,63 +790,61 @@ static Future<MessageEvent*> parse(const Request& request)
 
 namespace internal {
 
-void decode_recv(
-    const Future<size_t>& length,
-    char* data,
-    size_t size,
-    Socket socket,
-    StreamingRequestDecoder* decoder)
+void receive(Socket socket)
 {
-  if (length.isDiscarded() || length.isFailed()) {
-    if (length.isFailed()) {
-      VLOG(1) << "Decode failure: " << length.failure();
+  StreamingRequestDecoder* decoder = new StreamingRequestDecoder();
+
+  const size_t size = 80 * 1024;
+  char* data = new char[size];
+
+  Future<Nothing> recv_loop = process::loop(
+      None(),
+      [=] {
+        return socket.recv(data, size);
+      },
+      [=](size_t length) -> Future<ControlFlow<Nothing>> {
+        if (length == 0) {
+          return Break(); // EOF.
+        }
+
+        // Decode as much of the data as possible into HTTP requests.
+        const deque<Request*> requests = decoder->decode(data, length);
+
+        if (requests.empty() && decoder->failed()) {
+          return Failure("Decoder error");
+        }
+
+        if (!requests.empty()) {
+          // Get the peer address to augment the requests.
+          Try<Address> address = socket.peer();
+
+          if (address.isError()) {
+            return Failure("Failed to get peer address: " + address.error());
+          }
+
+          foreach (Request* request, requests) {
+            request->client = address.get();
+            process_manager->handle(socket, request);
+          }
+        }
+
+        return Continue();
+      });
+
+  recv_loop.onAny([=](const Future<Nothing> f) {
+    if (f.isFailed()) {
+      Try<Address> peer = socket.peer();
+
+      LOG(WARNING)
+        << "Failed to recv on socket " << socket.get() << " to peer '"
+        << (peer.isSome() ? stringify(peer.get()) : "unknown")
+        << "': " << f.failure();
     }
 
     socket_manager->close(socket);
     delete[] data;
     delete decoder;
-    return;
-  }
-
-  if (length.get() == 0) {
-    socket_manager->close(socket);
-    delete[] data;
-    delete decoder;
-    return;
-  }
-
-  // Decode as much of the data as possible into HTTP requests.
-  const deque<Request*> requests = decoder->decode(data, length.get());
-
-  if (requests.empty() && decoder->failed()) {
-     VLOG(1) << "Decoder error while receiving";
-     socket_manager->close(socket);
-     delete[] data;
-     delete decoder;
-     return;
-  }
-
-  if (!requests.empty()) {
-    // Get the peer address to augment the requests.
-    Try<Address> address = socket.peer();
-
-    if (address.isError()) {
-      VLOG(1) << "Failed to get peer address while receiving: "
-              << address.error();
-      socket_manager->close(socket);
-      delete[] data;
-      delete decoder;
-      return;
-    }
-
-    foreach (Request* request, requests) {
-      request->client = address.get();
-      process_manager->handle(socket, request);
-    }
-  }
-
-  socket.recv(data, size)
-    .onAny(lambda::bind(&decode_recv, lambda::_1, data, size, socket, decoder));
+  });
 }
 
 } // namespace internal {
@@ -909,19 +907,8 @@ void on_accept(const Future<Socket>& socket)
     // Inform the socket manager for proper bookkeeping.
     socket_manager->accepted(socket.get());
 
-    const size_t size = 80 * 1024;
-    char* data = new char[size];
-
-    StreamingRequestDecoder* decoder = new StreamingRequestDecoder();
-
-    socket->recv(data, size)
-      .onAny(lambda::bind(
-          &internal::decode_recv,
-          lambda::_1,
-          data,
-          size,
-          socket.get(),
-          decoder));
+    // Start the receive loop for the socket.
+    receive(socket.get());
   }
 
   // NOTE: `__s__` may be cleaned up during `process::finalize`.
@@ -1429,13 +1416,16 @@ void ignore_recv_data(
     char* data,
     size_t size)
 {
-  if (length.isDiscarded() || length.isFailed()) {
-    socket_manager->close(socket);
-    delete[] data;
-    return;
-  }
+  if (!length.isReady() || length.get() == 0) {
+    if (length.isFailed()) {
+      Try<Address> peer = socket.peer();
 
-  if (length.get() == 0) {
+      LOG(WARNING)
+        << "Failed to recv on socket " << socket.get() << " to peer '"
+        << (peer.isSome() ? stringify(peer.get()) : "unknown")
+        << "': " << length.failure();
+    }
+
     socket_manager->close(socket);
     delete[] data;
     return;
@@ -1655,8 +1645,13 @@ void SocketManager::link(
         // socket from the mapping of linkees and linkers.
         Try<Nothing, SocketError> shutdown = existing.shutdown();
         if (shutdown.isError()) {
-          VLOG(1) << "Failed to shutdown old link: "
-                  << shutdown.error().message;
+          Try<Address> peer = existing.peer();
+
+          LOG(WARNING)
+            << "Failed to shutdown old link to " << to
+            << " using socket " << existing.get() << " to peer '"
+            << (peer.isSome() ? stringify(peer.get()) : "unknown")
+            << "': " << shutdown.error().message;
         }
 
         connect = true;
@@ -1809,6 +1804,14 @@ Future<Nothing> _send(Encoder* encoder, Socket socket)
             return Nothing();
           })
           .recover([=](const Future<Nothing>& f) {
+            if (f.isFailed()) {
+              Try<Address> peer = socket.peer();
+
+              LOG(WARNING)
+                << "Failed to send on socket " << socket.get() << " to peer '"
+                << (peer.isSome() ? stringify(peer.get()) : "unknown")
+                << "': " << f.failure();
+            }
             socket_manager->close(socket);
             delete encoder;
             return f; // Break the loop by propagating the "failure".
@@ -2108,11 +2111,12 @@ Encoder* SocketManager::next(int_fd s)
           // socket is already closed so it by itself doesn't necessarily
           // suggest anything wrong.
           if (shutdown.isError()) {
-            LOG(INFO) << "Failed to shutdown socket with fd " << socket.get()
-                      << ", address " << (socket.address().isSome()
-                                            ? stringify(socket.address().get())
-                                            : "N/A")
-                      << ": " << shutdown.error().message;
+            Try<Address> peer = socket.peer();
+
+            LOG(WARNING)
+              << "Failed to shutdown socket " << socket.get() << " to peer '"
+              << (peer.isSome() ? stringify(peer.get()) : "unknown")
+              << "': " << shutdown.error().message;
           }
         }
       }
@@ -2204,11 +2208,12 @@ void SocketManager::close(int_fd s)
 #else // __WINDOWS__
           shutdown.error().code != ENOTCONN) {
 #endif // __WINDOWS__
-        LOG(ERROR) << "Failed to shutdown socket with fd " << socket.get()
-                   << ", address " << (socket.address().isSome()
-                                         ? stringify(socket.address().get())
-                                         : "N/A")
-                   << ": " << shutdown.error().message;
+        Try<Address> peer = socket.peer();
+
+        LOG(WARNING)
+          << "Failed to shutdown socket " << socket.get() << " to peer '"
+          << (peer.isSome() ? stringify(peer.get()) : "unknown")
+          << "': " << shutdown.error().message;
       }
     }
   }

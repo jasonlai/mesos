@@ -44,6 +44,8 @@
 #include "linux/fs.hpp"
 #include "linux/ns.hpp"
 
+#include "slave/state.hpp"
+
 namespace io = process::io;
 namespace paths = mesos::internal::slave::cni::paths;
 namespace spec = mesos::internal::slave::cni::spec;
@@ -132,19 +134,21 @@ Try<Isolator*> NetworkCniIsolatorProcess::create(const Flags& flags)
     return Error("Unable to load CNI config: " + networkConfigs.error());
   }
 
+  const string cniRootDir = paths::getCniRootDir(flags);
+
   // Create the CNI network information root directory if it does not exist.
-  Try<Nothing> mkdir = os::mkdir(paths::ROOT_DIR);
+  Try<Nothing> mkdir = os::mkdir(cniRootDir);
   if (mkdir.isError()) {
     return Error(
         "Failed to create CNI network information root directory at '" +
-        string(paths::ROOT_DIR) + "': " + mkdir.error());
+        cniRootDir + "': " + mkdir.error());
   }
 
-  Result<string> rootDir = os::realpath(paths::ROOT_DIR);
+  Result<string> rootDir = os::realpath(cniRootDir);
   if (!rootDir.isSome()) {
     return Error(
         "Failed to determine canonical path of CNI network information root"
-        " directory '" + string(paths::ROOT_DIR) + "': " +
+        " directory '" + cniRootDir + "': " +
         (rootDir.isError() ? rootDir.error() : "No such file or directory"));
   }
 
@@ -279,8 +283,7 @@ Try<Isolator*> NetworkCniIsolatorProcess::create(const Flags& flags)
           networkConfigs.get(),
           cniDNSMap,
           defaultCniDNS,
-          rootDir.get(),
-          flags.network_cni_plugins_dir.get())));
+          rootDir.get())));
 }
 
 
@@ -426,17 +429,15 @@ Future<Nothing> NetworkCniIsolatorProcess::recover(
             "Failed to recover CNI network information for orphaned the "
             "container " + stringify(containerId) + ": " + recover.error());
       }
+
+      // Known orphan containers will be cleaned up by containerizer
+      // using the normal cleanup path. See MESOS-2367 for details.
+      if (!orphans.contains(containerId)) {
+        LOG(INFO) << "Removing unknown orphaned container " << containerId;
+
+        cleanup(containerId);
+      }
     }
-
-    // Known orphan containers will be cleaned up by containerizer
-    // using the normal cleanup path. See MESOS-2367 for details.
-    if (orphans.contains(containerId)) {
-      continue;
-    }
-
-    LOG(INFO) << "Removing unknown orphaned container " << containerId;
-
-    cleanup(containerId);
   }
 
   return Nothing();
@@ -832,12 +833,11 @@ Future<Nothing> NetworkCniIsolatorProcess::isolate(
   // level or nested) wants to join non-host networks.
 
   // If the `network/cni` isolator is providing network isolation to a
-  // container its `rootDir` and `pluginDir` should always be set.
-  // These properties of the isolator will not be set only if the
-  // operator does not specify the '--network_cni_plugins_dir' and
-  // '--network_cni_config_dir' flags at agent startup.
+  // container its `rootDir` should always be set.  It will not be set
+  // only if the operator does not specify the
+  // '--network_cni_plugins_dir' and '--network_cni_config_dir' flags
+  // at agent startup.
   CHECK_SOME(rootDir);
-  CHECK_SOME(pluginDir);
 
   // NOTE: DEBUG container should not have Info struct. Thus if the
   // control reaches here, the container is not a DEBUG container.
@@ -1188,10 +1188,12 @@ Future<Nothing> NetworkCniIsolatorProcess::attach(
   }
 
   // Prepare environment variables for CNI plugin.
+  CHECK_SOME(flags.network_cni_plugins_dir);
+
   map<string, string> environment;
   environment["CNI_COMMAND"] = "ADD";
   environment["CNI_CONTAINERID"] = stringify(containerId);
-  environment["CNI_PATH"] = pluginDir.get();
+  environment["CNI_PATH"] = flags.network_cni_plugins_dir.get();
   environment["CNI_IFNAME"] = containerNetwork.ifName;
   environment["CNI_NETNS"] = netNsHandle;
 
@@ -1236,8 +1238,8 @@ Future<Nothing> NetworkCniIsolatorProcess::attach(
 
   // Invoke the CNI plugin.
   //
-  // NOTE: We want to execute only the plugin found in the `pluginDir`
-  // path specified by the operator.
+  // NOTE: We want to execute only the plugin found in the
+  // `flags.network_cni_plugins_dir` path specified by the operator.
   Result<JSON::String> _plugin = networkConfigJSON->at<JSON::String>("type");
   if (!_plugin.isSome()) {
     return Failure(
@@ -1249,7 +1251,7 @@ Future<Nothing> NetworkCniIsolatorProcess::attach(
 
   Option<string> plugin = os::which(
       _plugin->value,
-      pluginDir.get());
+      flags.network_cni_plugins_dir.get());
 
   if (plugin.isNone()) {
     return Failure(
@@ -1265,20 +1267,23 @@ Future<Nothing> NetworkCniIsolatorProcess::attach(
       containerId,
       networkName);
 
-  Try<Nothing> write =
-    os::write(networkConfigPath, stringify(networkConfigJSON.get()));
+  Try<Nothing> checkpoint = slave::state::checkpoint(
+      networkConfigPath,
+      stringify(networkConfigJSON.get()));
 
-  if (write.isError()) {
+  if (checkpoint.isError()) {
     return Failure(
         "Failed to checkpoint the CNI network configuration '" +
-        stringify(networkConfigJSON.get()) + "': " + write.error());
+        stringify(networkConfigJSON.get()) + "': " + checkpoint.error());
   }
 
-  VLOG(1) << "Invoking CNI plugin '" << plugin.get()
-          << "' with network configuration '"
+  LOG(INFO) << "Invoking CNI plugin '" << plugin.get()
+            << "' to attach container " << containerId
+            << " to network '" << networkName << "'";
+
+  VLOG(1) << "Using network configuration '"
           << stringify(networkConfigJSON.get())
-          << "' to attach container " << containerId << " to network '"
-          << networkName << "'";
+          << "' for container " << containerId;
 
   Try<Subprocess> s = subprocess(
       plugin.get(),
@@ -1386,11 +1391,13 @@ Future<Nothing> NetworkCniIsolatorProcess::_attach(
       networkName,
       containerNetwork.ifName);
 
-  Try<Nothing> write = os::write(networkInfoPath, output.get());
-  if (write.isError()) {
+  Try<Nothing> checkpoint =
+    slave::state::checkpoint(networkInfoPath, output.get());
+
+  if (checkpoint.isError()) {
     return Failure(
         "Failed to checkpoint the output of CNI plugin '" +
-        output.get() + "': " + write.error());
+        output.get() + "': " + checkpoint.error());
   }
 
   containerNetwork.cniNetworkInfo = parse.get();
@@ -1465,6 +1472,30 @@ Future<ContainerStatus> NetworkCniIsolatorProcess::status(
 }
 
 
+static Try<bool> isNetworkNamespaceHandle(const string& netNsHandle)
+{
+  // Determine if a path is a network namespace handle or not by
+  // checking its device number against that of '/proc'. If they are
+  // not the same, the given path shouldn't be a network namespac
+  // handle.
+  Try<dev_t> netNsHandleDev = os::stat::dev(netNsHandle);
+  if (netNsHandleDev.isError()) {
+    return Error(
+        "Failed to get the device number of '" + netNsHandle +
+        "': " + netNsHandleDev.error());
+  }
+
+  Try<dev_t> procDev = os::stat::dev("/proc/self/ns/net");
+  if (procDev.isError()) {
+    return Error(
+        "Failed to get the device number of '/proc/self/ns/net'"
+        ": " + procDev.error());
+  }
+
+  return netNsHandleDev.get() == procDev.get();
+}
+
+
 Future<Nothing> NetworkCniIsolatorProcess::cleanup(
     const ContainerID& containerId)
 {
@@ -1536,25 +1567,34 @@ Future<Nothing> NetworkCniIsolatorProcess::_cleanup(
     paths::getNamespacePath(rootDir.get(), containerId);
 
   if (os::exists(target)) {
-    Try<Nothing> unmount = fs::unmount(target);
-    if (unmount.isError()) {
-      return Failure(
-          "Failed to unmount the network namespace handle '" +
-          target + "': " + unmount.error());
+    Try<bool> isNetNsHandle = isNetworkNamespaceHandle(target);
+    if (isNetNsHandle.isError()) {
+      return Failure(isNetNsHandle.error());
     }
 
-    LOG(INFO) << "Unmounted the network namespace handle '"
-              << target << "' for container " << containerId;
+    if (isNetNsHandle.get()) {
+      Try<Nothing> unmount = fs::unmount(target);
+      if (unmount.isError()) {
+        return Failure(
+            "Failed to unmount the network namespace handle '" +
+            target + "': " + unmount.error());
+      }
+
+      LOG(INFO) << "Unmounted the network namespace handle '"
+                << target << "' for container " << containerId;
+    }
   }
 
-  Try<Nothing> rmdir = os::rmdir(containerDir);
-  if (rmdir.isError()) {
-    return Failure(
-        "Failed to remove the container directory '" +
-        containerDir + "': " + rmdir.error());
-  }
+  if (os::exists(containerDir)) {
+    Try<Nothing> rmdir = os::rmdir(containerDir);
+    if (rmdir.isError()) {
+      return Failure(
+          "Failed to remove the container directory '" +
+          containerDir + "': " + rmdir.error());
+    }
 
-  LOG(INFO) << "Removed the container directory '" << containerDir << "'";
+    LOG(INFO) << "Removed the container directory '" << containerDir << "'";
+  }
 
   infos.erase(containerId);
 
@@ -1572,14 +1612,55 @@ Future<Nothing> NetworkCniIsolatorProcess::detach(
   const ContainerNetwork& containerNetwork =
     infos[containerId]->containerNetworks[networkName];
 
+  // Use the checkpointed CNI network configuration to call the
+  // CNI plugin to detach the container from the CNI network.
+  const string networkConfigPath = paths::getNetworkConfigPath(
+      rootDir.get(),
+      containerId,
+      networkName);
+
+  // There are two cases that the network config file might not exist
+  // when `detach` happens:
+  // (1) The container is destroyed when preparing. In that case, we
+  //     know that `attach` hasn't been called. Therefore, no need to
+  //     call `detach`.
+  // (2) The agent crashes when isolating, but before the network
+  //     config file is checkpointed. In that case, we also know that
+  //     CNI ADD command hasn't been called. Therefore, no need to
+  //     call `detach`.
+  if (!os::exists(networkConfigPath)) {
+    LOG(WARNING) << "Skip detach since network config file for container "
+                 << containerId << " and network name '" << networkName << "' "
+                 << "does not exist";
+    return Nothing();
+  }
+
   // Prepare environment variables for CNI plugin.
+  CHECK_SOME(flags.network_cni_plugins_dir);
+
   map<string, string> environment;
   environment["CNI_COMMAND"] = "DEL";
   environment["CNI_CONTAINERID"] = stringify(containerId);
-  environment["CNI_PATH"] = pluginDir.get();
+  environment["CNI_PATH"] = flags.network_cni_plugins_dir.get();
   environment["CNI_IFNAME"] = containerNetwork.ifName;
-  environment["CNI_NETNS"] =
-      paths::getNamespacePath(rootDir.get(), containerId);
+
+  // If the file is not a network namespace handle, do not set
+  // `CNI_NETNS`. This is possible after a reboot where all bind
+  // mounts of the network namespace handles are gone. According to
+  // the CNI spec, we should not set `CNI_NETNS` in such a case, but
+  // still call `DEL` command so that CNI plugins can do best effort
+  // cleanup (e.g., deallocating IP allocated for the container).
+  const string netNsHandle =
+    paths::getNamespacePath(rootDir.get(), containerId);
+
+  Try<bool> isNetNsHandle = isNetworkNamespaceHandle(netNsHandle);
+  if (isNetNsHandle.isError()) {
+    return Failure(isNetNsHandle.error());
+  }
+
+  if (isNetNsHandle.get()) {
+    environment["CNI_NETNS"] = netNsHandle;
+  }
 
   // Some CNI plugins need to run "iptables" to set up IP Masquerade, so we
   // need to set the "PATH" environment variable so that the plugin can locate
@@ -1590,13 +1671,6 @@ Future<Nothing> NetworkCniIsolatorProcess::detach(
   } else {
     environment["PATH"] = os::host_default_path();
   }
-
-  // Use the checkpointed CNI network configuration to call the
-  // CNI plugin to detach the container from the CNI network.
-  const string networkConfigPath = paths::getNetworkConfigPath(
-      rootDir.get(),
-      containerId,
-      networkName);
 
   Try<JSON::Object> networkConfigJSON = getNetworkConfigJSON(
       networkName,
@@ -1618,11 +1692,11 @@ Future<Nothing> NetworkCniIsolatorProcess::detach(
 
   // Invoke the CNI plugin.
   //
-  // NOTE: We want to execute only the plugin found in the `pluginDir`
-  // path specified by the operator.
+  // NOTE: We want to execute only the plugin found in the
+  // `flags.network_cni_plugins_dir` path specified by the operator.
   Option<string> plugin = os::which(
       _plugin->value,
-      pluginDir.get());
+      flags.network_cni_plugins_dir.get());
 
   if (plugin.isNone()) {
     return Failure(
@@ -1631,10 +1705,12 @@ Future<Nothing> NetworkCniIsolatorProcess::detach(
         " to network '" + networkName + "'");
   }
 
-  VLOG(1) << "Invoking CNI plugin '" << plugin.get()
-          << "' with network configuration '" << networkConfigPath
-          << "' to detach container " << containerId << " from network '"
-          << networkName << "'";
+  LOG(INFO) << "Invoking CNI plugin '" << plugin.get()
+            << "' to detach container " << containerId
+            << " from network '" << networkName << "'";
+
+  VLOG(1) << "Using network configuration at '" << networkConfigPath
+          << "' for container " << containerId;
 
   Try<Subprocess> s = subprocess(
       plugin.get(),
@@ -1787,27 +1863,32 @@ Try<JSON::Object> NetworkCniIsolatorProcess::getNetworkConfigJSON(
   }
 
   // Cache-miss.
-  Try<hashmap<string, string>> _networkConfigs = loadNetworkConfigs(
-      flags.network_cni_config_dir.get(),
-      flags.network_cni_plugins_dir.get());
+  if (rootDir.isSome()) {
+    CHECK_SOME(flags.network_cni_config_dir);
+    CHECK_SOME(flags.network_cni_plugins_dir);
 
-  if (_networkConfigs.isError()) {
-      return Error(
-          "Encountered error while loading CNI config during "
-          "a cache-miss for CNI network '" + network + "': " +
-          _networkConfigs.error());
-  }
+    Try<hashmap<string, string>> _networkConfigs = loadNetworkConfigs(
+        flags.network_cni_config_dir.get(),
+        flags.network_cni_plugins_dir.get());
 
-  networkConfigs = _networkConfigs.get();
+    if (_networkConfigs.isError()) {
+        return Error(
+            "Encountered error while loading CNI config during "
+            "a cache-miss for CNI network '" + network + "': " +
+            _networkConfigs.error());
+    }
 
-  // Do another search.
-  if (networkConfigs.contains(network)) {
-    // This is a best-effort retrieval of the CNI network config. So
-    // if it fails in this attempt just return the `Error` instead of
-    // trying to erase the network from cache. Deletion of the
-    // network, in case of an error, will happen on its own in the
-    // next attempt.
-    return getNetworkConfigJSON(network, networkConfigs[network]);
+    networkConfigs = _networkConfigs.get();
+
+    // Do another search.
+    if (networkConfigs.contains(network)) {
+      // This is a best-effort retrieval of the CNI network config. So
+      // if it fails in this attempt just return the `Error` instead of
+      // trying to erase the network from cache. Deletion of the
+      // network, in case of an error, will happen on its own in the
+      // next attempt.
+      return getNetworkConfigJSON(network, networkConfigs[network]);
+    }
   }
 
   return Error("Unknown CNI network '" + network + "'");

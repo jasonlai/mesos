@@ -225,13 +225,36 @@ load an alternate authenticatee module using <code>--modules</code>. (default: c
     --authentication_backoff_factor=VALUE
   </td>
   <td>
-After a failed authentication the agent picks a random amount of time between
-<code>[0, b]</code>, where <code>b = authentication_backoff_factor</code>, to
-authenticate with a new master. Subsequent retries are exponentially backed
-off based on this interval (e.g., 1st retry uses a random value between
-<code>[0, b * 2^1]</code>, 2nd retry between <code>[0, b * 2^2]</code>, 3rd
-retry between <code>[0, b * 2^3]</code>, etc up to a maximum of 1mins
-(default: 1secs)
+The agent will time out its authentication with the master based on
+exponential backoff. The timeout will be randomly chosen within the
+range <code>[min, min + factor*2^n]</code> where <code>n</code> is the number
+of failed attempts. To tune these parameters, set the
+<code>--authentication_timeout_[min|max|factor]</code> flags. (default: 1secs)
+  </td>
+</tr>
+
+<tr id="authentication_timeout_min">
+  <td>
+    --authentication_timeout_min=VALUE
+  </td>
+  <td>
+The minimum amount of time the agent waits before retrying authenticating
+with the master. See <code>--authentication_backoff_factor</code> for more
+details. (default: 5secs)
+<p/>NOTE that since authentication retry cancels the previous authentication
+request, one should consider what is the normal authentication delay when
+setting this flag to prevent premature retry.</p>
+  </td>
+</tr>
+
+<tr id="authentication_timeout_max">
+  <td>
+    --authentication_timeout_max=VALUE
+  </td>
+  <td>
+The maximum amount of time the agent waits before retrying authenticating
+with the master. See <code>--authentication_backoff_factor</code> for more
+details. (default: 1mins)
   </td>
 </tr>
 <tr>
@@ -1032,6 +1055,15 @@ responsibility to install the CNI plugin binaries in the specified directory.
 Directory path of the CNI network configuration files. For each network that
 containers launched in Mesos agent can connect to, the operator should install
 a network configuration file in JSON format in the specified directory.
+  </td>
+</tr>
+<tr>
+  <td>
+    --[no-]network_cni_root_dir_persist
+  </td>
+  <td>
+This setting controls whether the CNI root directory persists across
+reboot or not.
   </td>
 </tr>
 <tr>

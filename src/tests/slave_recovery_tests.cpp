@@ -2795,11 +2795,8 @@ TYPED_TEST(SlaveRecoveryTest, Reboot)
 
   EXPECT_TRUE(executorState.runs.contains(containerId2.get()));
 
-  EXPECT_SOME_EQ(
-      executorPid,
-      executorState
-        .runs[containerId2.get()]
-        .libprocessPid);
+  EXPECT_NONE(executorState.runs[containerId2.get()].forkedPid);
+  EXPECT_NONE(executorState.runs[containerId2.get()].libprocessPid);
 
   EXPECT_TRUE(executorState
                 .runs[containerId2.get()]
@@ -3761,7 +3758,7 @@ TYPED_TEST(SlaveRecoveryTest, ReconcileTasksMissingFromSlave)
 {
   TestAllocator<master::allocator::HierarchicalDRFAllocator> allocator;
 
-  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _));
+  EXPECT_CALL(allocator, initialize(_, _, _, _, _, _, _));
 
   Try<Owned<cluster::Master>> master = this->StartMaster(&allocator);
   ASSERT_SOME(master);

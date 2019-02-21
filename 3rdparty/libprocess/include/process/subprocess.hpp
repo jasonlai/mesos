@@ -125,7 +125,8 @@ public:
         const Option<lambda::function<
             pid_t(const lambda::function<int()>&)>>& clone,
         const std::vector<Subprocess::ParentHook>& parent_hooks,
-        const std::vector<Subprocess::ChildHook>& child_hooks);
+        const std::vector<Subprocess::ChildHook>& child_hooks,
+        const std::vector<int_fd>& whitelist_fds);
 
     IO(const lambda::function<Try<InputFileDescriptors>()>& _input,
        const lambda::function<Try<OutputFileDescriptors>()>& _output)
@@ -204,12 +205,6 @@ public:
      * `ChildHook` for duplicating a file descriptor.
      */
     static ChildHook DUP2(int oldFd, int newFd);
-
-    /**
-     * `ChildHook` to unset CLOEXEC on a file descriptor. This is
-     * useful to explicitly pass an FD to a subprocess.
-     */
-    static ChildHook UNSET_CLOEXEC(int fd);
 #endif // __WINDOWS__
 
     /**
@@ -305,7 +300,8 @@ private:
       const Option<lambda::function<
           pid_t(const lambda::function<int()>&)>>& clone,
       const std::vector<Subprocess::ParentHook>& parent_hooks,
-      const std::vector<Subprocess::ChildHook>& child_hooks);
+      const std::vector<Subprocess::ChildHook>& child_hooks,
+      const std::vector<int_fd>& whitelist_fds);
 
   struct Data
   {
@@ -377,7 +373,8 @@ Try<Subprocess> subprocess(
     const Option<lambda::function<
         pid_t(const lambda::function<int()>&)>>& clone = None(),
     const std::vector<Subprocess::ParentHook>& parent_hooks = {},
-    const std::vector<Subprocess::ChildHook>& child_hooks = {});
+    const std::vector<Subprocess::ChildHook>& child_hooks = {},
+    const std::vector<int_fd>& whitelist_fds = {});
 
 
 /**
@@ -413,7 +410,8 @@ inline Try<Subprocess> subprocess(
     const Option<lambda::function<
         pid_t(const lambda::function<int()>&)>>& clone = None(),
     const std::vector<Subprocess::ParentHook>& parent_hooks = {},
-    const std::vector<Subprocess::ChildHook>& child_hooks = {})
+    const std::vector<Subprocess::ChildHook>& child_hooks = {},
+    const std::vector<int_fd>& whitelist_fds = {})
 {
   std::vector<std::string> argv = {os::Shell::arg0, os::Shell::arg1, command};
 
@@ -427,7 +425,8 @@ inline Try<Subprocess> subprocess(
       environment,
       clone,
       parent_hooks,
-      child_hooks);
+      child_hooks,
+      whitelist_fds);
 }
 
 } // namespace process {

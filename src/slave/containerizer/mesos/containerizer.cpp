@@ -50,6 +50,10 @@
 
 #include "hook/manager.hpp"
 
+#ifdef ENABLE_LAUNCHER_SEALING
+#include "linux/memfd.hpp"
+#endif // ENABLE_LAUNCHER_SEALING
+
 #include "module/manager.hpp"
 
 #include "slave/paths.hpp"
@@ -565,6 +569,37 @@ Try<MesosContainerizer*> MesosContainerizer::create(
   _isolators.push_back(Owned<Isolator>(new MesosIsolator(
       Owned<MesosIsolatorProcess>(ioSwitchboard.get()))));
 
+  Option<int_fd> initMemFd;
+  Option<int_fd> commandExecutorMemFd;
+
+#ifdef ENABLE_LAUNCHER_SEALING
+  // Clone the launcher binary in memory for security concerns.
+  Try<int_fd> memFd = memfd::cloneSealedFile(
+      path::join(flags.launcher_dir, MESOS_CONTAINERIZER));
+
+  if (memFd.isError()) {
+    return Error(
+        "Failed to clone a sealed file '" +
+        path::join(flags.launcher_dir, MESOS_CONTAINERIZER) + "' in memory: " +
+        memFd.error());
+  }
+
+  initMemFd = memFd.get();
+
+  // Clone the command executor binary in memory for security.
+  memFd = memfd::cloneSealedFile(
+      path::join(flags.launcher_dir, MESOS_EXECUTOR));
+
+  if (memFd.isError()) {
+    return Error(
+        "Failed to clone a sealed file '" +
+        path::join(flags.launcher_dir, MESOS_EXECUTOR) + "' in memory: " +
+        memFd.error());
+  }
+
+  commandExecutorMemFd = memFd.get();
+#endif // ENABLE_LAUNCHER_SEALING
+
   return new MesosContainerizer(Owned<MesosContainerizerProcess>(
       new MesosContainerizerProcess(
           flags,
@@ -572,7 +607,9 @@ Try<MesosContainerizer*> MesosContainerizer::create(
           ioSwitchboard.get(),
           launcher,
           provisioner,
-          _isolators)));
+          _isolators,
+          initMemFd,
+          commandExecutorMemFd)));
 }
 
 
@@ -1162,9 +1199,9 @@ Future<Containerizer::LaunchResult> MesosContainerizerProcess::launch(
   // to modify it based on the parent container (for nested containers).
   ContainerConfig containerConfig = _containerConfig;
 
-  // For nested containers, we must perform some extra validation
-  // (i.e. does the parent exist?) and create the sandbox directory
-  // based on the parent's sandbox.
+  // For nested containers, we must perform some extra validation (i.e. does
+  // the parent exist?), inherit user from parent if needed and create the
+  // sandbox directory based on the parent's sandbox.
   if (containerId.has_parent()) {
     if (containerConfig.has_task_info() ||
         containerConfig.has_executor_info()) {
@@ -1188,6 +1225,14 @@ Future<Containerizer::LaunchResult> MesosContainerizerProcess::launch(
       return Failure(
           "Parent container " + stringify(parentContainerId) +
           " is in 'DESTROYING' state");
+    }
+
+    // Inherit user from the parent container iff there is no
+    // user specified in the nested container's `commandInfo`.
+    if (!containerConfig.has_user() &&
+        containers_[parentContainerId]->config.isSome() &&
+        containers_[parentContainerId]->config->has_user()) {
+      containerConfig.set_user(containers_[parentContainerId]->config->user());
     }
 
     const ContainerID rootContainerId =
@@ -1312,36 +1357,42 @@ Future<Containerizer::LaunchResult> MesosContainerizerProcess::launch(
 
   containers_.put(containerId, container);
 
+  Future<Nothing> _prepare;
+
   // We'll first provision the image for the container, and
   // then provision the images specified in `volumes` using
   // the 'volume/image' isolator.
   if (!containerConfig.has_container_info() ||
       !containerConfig.container_info().mesos().has_image()) {
-    return prepare(containerId, None())
-      .then(defer(self(), [this, containerId] () {
-        return ioSwitchboard->extractContainerIO(containerId);
-      }))
-      .then(defer(self(),
-                  &Self::_launch,
-                  containerId,
-                  lambda::_1,
-                  environment,
-                  pidCheckpointPath));
-  }
-
-  container->provisioning = provisioner->provision(
+    _prepare = prepare(containerId, None());
+  } else {
+    container->provisioning = provisioner->provision(
       containerId,
       containerConfig.container_info().mesos().image());
 
-  return container->provisioning
-    .then(defer(self(), [=](const ProvisionInfo& provisionInfo) {
-      return prepare(containerId, provisionInfo);
-    }))
+    _prepare = container->provisioning
+      .then(defer(self(), [=](const ProvisionInfo& provisionInfo) {
+        return prepare(containerId, provisionInfo);
+      }));
+  }
+
+  return _prepare
     .then(defer(self(), [this, containerId] () {
       return ioSwitchboard->extractContainerIO(containerId);
     }))
     .then(defer(self(), [=](const Option<ContainerIO>& containerIO) {
-       return _launch(containerId, containerIO, environment, pidCheckpointPath);
+      return _launch(containerId, containerIO, environment, pidCheckpointPath);
+    }))
+    .onAny(defer(self(), [this, containerId](
+        const Future<Containerizer::LaunchResult>& future) {
+      // We need to clean up the container IO in the case when IOSwitchboard
+      // process has started, but we have not taken ownership of the container
+      // IO by calling `extractContainerIO()`. This may happen if `launch`
+      // future is discarded by the caller of this method. The container IO
+      // stores FDs in the `FDWrapper` struct, which closes these FDs on its
+      // destruction. Otherwise, IOSwitchboard might get stuck trying to read
+      // leaked FDs.
+      ioSwitchboard->extractContainerIO(containerId);
     }));
 }
 
@@ -1865,6 +1916,16 @@ Future<Containerizer::LaunchResult> MesosContainerizerProcess::_launch(
 
   const std::array<int_fd, 2>& pipes = pipes_.get();
 
+  vector<int_fd> whitelistFds{pipes[0], pipes[1]};
+
+  // Seal the command executor binary if needed.
+  if (container->config->has_task_info() && commandExecutorMemFd.isSome()) {
+    launchInfo.mutable_command()->set_value(
+        "/proc/self/fd/" + stringify(commandExecutorMemFd.get()));
+
+    whitelistFds.push_back(commandExecutorMemFd.get());
+  }
+
   // Prepare the flags to pass to the launch process.
   MesosContainerizerLaunch::Flags launchFlags;
 
@@ -1917,20 +1978,31 @@ Future<Containerizer::LaunchResult> MesosContainerizerProcess::_launch(
       return Failure("Unknown parent container");
     }
 
-    if (containers_.at(containerId.parent())->pid.isNone()) {
+    const Owned<Container>& parentContainer =
+      containers_.at(containerId.parent());
+
+    if (parentContainer->pid.isNone()) {
       return Failure("Unknown parent container pid");
     }
 
-    pid_t parentPid = containers_.at(containerId.parent())->pid.get();
+    const pid_t parentPid = parentContainer->pid.get();
 
-    Try<pid_t> mountNamespaceTarget = getMountNamespaceTarget(parentPid);
-    if (mountNamespaceTarget.isError()) {
-      return Failure(
-          "Cannot get target mount namespace from process " +
-          stringify(parentPid) + ": " + mountNamespaceTarget.error());
+    // For the command executor case, we need to find a PID of its task,
+    // which will be used to enter the task's mount namespace.
+    if (parentContainer->config.isSome() &&
+        parentContainer->config->has_task_info()) {
+      Try<pid_t> mountNamespaceTarget = getMountNamespaceTarget(parentPid);
+      if (mountNamespaceTarget.isError()) {
+        return Failure(
+            "Cannot get target mount namespace from process " +
+            stringify(parentPid) + ": " + mountNamespaceTarget.error());
+      }
+
+      launchFlags.namespace_mnt_target = mountNamespaceTarget.get();
+    } else {
+      launchFlags.namespace_mnt_target = parentPid;
     }
 
-    launchFlags.namespace_mnt_target = mountNamespaceTarget.get();
     _enterNamespaces = _enterNamespaces.get() & ~CLONE_NEWNS;
   }
 #endif // __linux__
@@ -1950,25 +2022,31 @@ Future<Containerizer::LaunchResult> MesosContainerizerProcess::_launch(
       launchFlagsEnvironment.end());
 
   // Fork the child using launcher.
+  string initPath = initMemFd.isSome()
+    ? ("/proc/self/fd/" + stringify(initMemFd.get()))
+    : path::join(flags.launcher_dir, MESOS_CONTAINERIZER);
+
   vector<string> argv(2);
   argv[0] = path::join(flags.launcher_dir, MESOS_CONTAINERIZER);
   argv[1] = MesosContainerizerLaunch::NAME;
 
   Try<pid_t> forked = launcher->fork(
       containerId,
-      argv[0],
+      initPath,
       argv,
-      containerIO->in,
-      containerIO->out,
-      containerIO->err,
+      containerIO.get(),
       nullptr,
       launchEnvironment,
       // 'enterNamespaces' will be ignored by SubprocessLauncher.
       _enterNamespaces,
       // 'cloneNamespaces' will be ignored by SubprocessLauncher.
-      _cloneNamespaces);
+      _cloneNamespaces,
+      whitelistFds);
 
   if (forked.isError()) {
+    os::close(pipes[0]);
+    os::close(pipes[1]);
+
     return Failure("Failed to fork: " + forked.error());
   }
 
@@ -1987,6 +2065,9 @@ Future<Containerizer::LaunchResult> MesosContainerizerProcess::_launch(
     if (checkpointed.isError()) {
       LOG(ERROR) << "Failed to checkpoint container's forked pid to '"
                  << pidCheckpointPath.get() << "': " << checkpointed.error();
+
+      os::close(pipes[0]);
+      os::close(pipes[1]);
 
       return Failure("Could not checkpoint container's pid");
     }
@@ -2011,6 +2092,9 @@ Future<Containerizer::LaunchResult> MesosContainerizerProcess::_launch(
   checkpointed = slave::state::checkpoint(pidPath, stringify(pid));
 
   if (checkpointed.isError()) {
+    os::close(pipes[0]);
+    os::close(pipes[1]);
+
     return Failure("Failed to checkpoint the container pid to"
                    " '" + pidPath + "': " + checkpointed.error());
   }
@@ -2712,6 +2796,10 @@ Future<bool> MesosContainerizerProcess::kill(
   }
 
   const Owned<Container>& container = containers_.at(containerId);
+
+  LOG_BASED_ON_CLASS(container->containerClass())
+    << "Sending " << strsignal(signal) << " to container "
+    << containerId << " in " << container->state << " state";
 
   // This can happen when we try to signal the container before it
   // is launched. We destroy the container forcefully in this case.

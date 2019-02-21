@@ -74,13 +74,12 @@ public:
       const ContainerID& containerId,
       const string& path,
       const vector<string>& argv,
-      const process::Subprocess::IO& in,
-      const process::Subprocess::IO& out,
-      const process::Subprocess::IO& err,
+      const mesos::slave::ContainerIO& containerIO,
       const flags::FlagsBase* flags,
       const Option<map<string, string>>& environment,
       const Option<int>& enterNamespaces,
-      const Option<int>& cloneNamespaces);
+      const Option<int>& cloneNamespaces,
+      const vector<int_fd>& whitelistFds);
 
   virtual process::Future<Nothing> destroy(const ContainerID& containerId);
 
@@ -250,13 +249,12 @@ Try<pid_t> LinuxLauncher::fork(
     const ContainerID& containerId,
     const string& path,
     const vector<string>& argv,
-    const process::Subprocess::IO& in,
-    const process::Subprocess::IO& out,
-    const process::Subprocess::IO& err,
+    const mesos::slave::ContainerIO& containerIO,
     const flags::FlagsBase* flags,
     const Option<map<string, string>>& environment,
     const Option<int>& enterNamespaces,
-    const Option<int>& cloneNamespaces)
+    const Option<int>& cloneNamespaces,
+    const vector<int_fd>& whitelistFds)
 {
   return dispatch(
       process.get(),
@@ -264,13 +262,12 @@ Try<pid_t> LinuxLauncher::fork(
       containerId,
       path,
       argv,
-      in,
-      out,
-      err,
+      containerIO,
       flags,
       environment,
       enterNamespaces,
-      cloneNamespaces).get();
+      cloneNamespaces,
+      whitelistFds).get();
 }
 
 
@@ -464,13 +461,12 @@ Try<pid_t> LinuxLauncherProcess::fork(
     const ContainerID& containerId,
     const string& path,
     const vector<string>& argv,
-    const process::Subprocess::IO& in,
-    const process::Subprocess::IO& out,
-    const process::Subprocess::IO& err,
+    const mesos::slave::ContainerIO& containerIO,
     const flags::FlagsBase* flags,
     const Option<map<string, string>>& environment,
     const Option<int>& enterNamespaces,
-    const Option<int>& cloneNamespaces)
+    const Option<int>& cloneNamespaces,
+    const vector<int_fd>& whitelistFds)
 {
   // Make sure this container (nested or not) is unique.
   if (containers.contains(containerId)) {
@@ -542,12 +538,16 @@ Try<pid_t> LinuxLauncherProcess::fork(
     }));
   }
 
+  vector<Subprocess::ChildHook> childHooks;
+
+  childHooks.push_back(Subprocess::ChildHook::SETSID());
+
   Try<Subprocess> child = subprocess(
       path,
       argv,
-      in,
-      out,
-      err,
+      containerIO.in,
+      containerIO.out,
+      containerIO.err,
       flags,
       environment,
       [target, enterFlags, cloneFlags](const lambda::function<int()>& child) {
@@ -568,7 +568,8 @@ Try<pid_t> LinuxLauncherProcess::fork(
         }
       },
       parentHooks,
-      {Subprocess::ChildHook::SETSID()});
+      childHooks,
+      whitelistFds);
 
   if (child.isError()) {
     return Error("Failed to clone child process: " + child.error());

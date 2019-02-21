@@ -35,8 +35,8 @@
 #include <stout/foreach.hpp>
 #include <stout/option.hpp>
 #include <stout/os.hpp>
-#include <stout/protobuf.hpp>
 #include <stout/path.hpp>
+#include <stout/protobuf.hpp>
 #include <stout/stringify.hpp>
 #include <stout/try.hpp>
 #include <stout/unreachable.hpp>
@@ -997,6 +997,14 @@ int MesosContainerizerLaunch::execute()
   }
 
 #ifndef __WINDOWS__
+  // Construct a set of file descriptors to close before `exec`'ing.
+  //
+  // On Windows all new processes create by Mesos go through the
+  // `create_process` wrapper which with the completion of MESOS-8926
+  // will prevent inadvertent leaks making this code unnecessary there.
+  Try<vector<int_fd>> fds = os::lsof();
+  CHECK_SOME(fds);
+
   // If we have `containerStatusFd` set, then we need to fork-exec the
   // command we are launching and checkpoint its status on exit. We
   // use fork-exec directly (as opposed to `process::subprocess()`) to
@@ -1066,6 +1074,21 @@ int MesosContainerizerLaunch::execute()
       signalSafeWriteStatus(status);
       os::close(containerStatusFd.get());
       ::_exit(EXIT_SUCCESS);
+    }
+
+    // Avoid leaking not required file descriptors into the forked process.
+    foreach (int_fd fd, fds.get()) {
+      if (fd != STDIN_FILENO && fd != STDOUT_FILENO && fd != STDERR_FILENO) {
+        // NOTE: Set "FD_CLOEXEC" on the fd, instead of closing it
+        // because exec below might exec a memfd.
+        int flags = ::fcntl(fd, F_GETFD);
+        if (flags == -1) {
+          ABORT("Failed to get FD flags");
+        }
+        if (::fcntl(fd, F_SETFD, flags | FD_CLOEXEC) == -1) {
+          ABORT("Failed to set FD_CLOEXEC");
+        }
+      }
     }
   }
 #endif // __WINDOWS__

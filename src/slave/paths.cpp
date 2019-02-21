@@ -796,7 +796,7 @@ Try<Nothing> createSandboxDirectory(
   // MESOS-8332 is resolved.
   Try<Nothing> chmod = os::chmod(directory, 0755);
   // UBER SPECIFIC: end.
-  if (mkdir.isError()) {
+  if (chmod.isError()) {
     return Error("Failed to chmod directory: " + chmod.error());
   }
 

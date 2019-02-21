@@ -38,15 +38,19 @@
 #include <stout/strings.hpp>
 #include <stout/unreachable.hpp>
 
+#include "common/resource_quantities.hpp"
 #include "common/resources_utils.hpp"
 
 using std::map;
 using std::ostream;
+using std::pair;
 using std::set;
 using std::string;
 using std::vector;
 
 using google::protobuf::RepeatedPtrField;
+
+using mesos::internal::ResourceQuantities;
 
 namespace mesos {
 
@@ -863,8 +867,11 @@ Option<Error> Resources::validate(const Resource& resource)
       return Error("Invalid scalar resource");
     }
 
-    if (resource.scalar().value() < 0) {
-      return Error("Invalid scalar resource: value < 0");
+    // We do not allow negative scalar resource values or
+    // non-zero values which would be represented as zero.
+    if (resource.scalar().value() != 0 &&
+        resource.scalar() <= Value::Scalar()) {
+      return Error("Invalid scalar resource: value <= 0");
     }
   } else if (resource.type() == Value::RANGES) {
     if (resource.has_scalar() ||
@@ -1245,6 +1252,17 @@ bool Resources::isShared(const Resource& resource)
 }
 
 
+bool Resources::isScalarQuantity(const Resources& resources)
+{
+  // Instead of checking the absence of non-scalar-quantity fields,
+  // we do an equality check between the original resources object and
+  // its stripped counterpart.
+  //
+  // We remove the static reservation metadata here via `toUnreserved()`.
+  return resources == resources.createStrippedScalarQuantity().toUnreserved();
+}
+
+
 bool Resources::hasRefinedReservations(const Resource& resource)
 {
   CHECK(!resource.has_role()) << resource;
@@ -1453,6 +1471,46 @@ bool Resources::contains(const Resource& that) const
 }
 
 
+// This function assumes all quantities with the same name are merged
+// in the input `quantities` which is a guaranteed property of
+// `ResourceQuantities`.
+bool Resources::contains(const ResourceQuantities& quantities) const
+{
+  foreach (auto& quantity, quantities){
+    double remaining = quantity.second.value();
+
+    foreach (const Resource& r, get(quantity.first)) {
+      switch (r.type()) {
+        case Value::SCALAR: remaining -= r.scalar().value(); break;
+        case Value::SET:    remaining -= r.set().item_size(); break;
+        case Value::RANGES:
+          foreach (const Value::Range& range, r.ranges().range()) {
+            remaining -= range.end() - range.begin() + 1;
+            if (remaining <= 0) {
+              break;
+            }
+          }
+          break;
+        case Value::TEXT:
+          LOG(FATAL) << "Unexpected TEXT type resource " << r << " in "
+                     << *this;
+          break;
+      }
+
+      if (remaining <= 0) {
+        break;
+      }
+    }
+
+    if (remaining > 0) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+
 size_t Resources::count(const Resource& that) const
 {
   foreach (const Resource_& resource_, resources) {
@@ -1626,23 +1684,12 @@ Resources Resources::createStrippedScalarQuantity() const
 
   foreach (const Resource& resource, resources) {
     if (resource.type() == Value::SCALAR) {
-      Resource scalar = resource;
-      scalar.clear_provider_id();
-      scalar.clear_allocation_info();
+      Resource scalar;
 
-      // We collapse the stack of reservations here to a single `STATIC`
-      // reservation in order to maintain existing behavior of ignoring
-      // the reservation type, and keeping the reservation role.
-      if (Resources::isReserved(scalar)) {
-        Resource::ReservationInfo collapsedReservation;
-        collapsedReservation.set_type(Resource::ReservationInfo::STATIC);
-        collapsedReservation.set_role(Resources::reservationRole(scalar));
-        scalar.clear_reservations();
-        scalar.add_reservations()->CopyFrom(collapsedReservation);
-      }
+      scalar.set_name(resource.name());
+      scalar.set_type(resource.type());
+      scalar.mutable_scalar()->CopyFrom(resource.scalar());
 
-      scalar.clear_disk();
-      scalar.clear_shared();
       stripped.add(scalar);
     }
   }

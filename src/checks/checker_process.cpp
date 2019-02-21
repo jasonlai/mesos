@@ -616,6 +616,8 @@ Future<int> CheckerProcess::nestedCommandCheck(
     agent::Call call;
     call.set_type(agent::Call::REMOVE_NESTED_CONTAINER);
 
+    mesos::ContainerID previousId = previousCheckContainerId.get();
+
     agent::Call::RemoveNestedContainer* removeContainer =
       call.mutable_remove_nested_container();
 
@@ -635,33 +637,31 @@ Future<int> CheckerProcess::nestedCommandCheck(
 
     http::request(request, false)
       .onFailed(defer(self(),
-                      [this, promise](const string& failure) {
+                      [this, promise, previousId](const string& failure) {
         LOG(WARNING) << "Connection to remove the nested container '"
-                     << previousCheckContainerId.get() << "' used for the "
-                     << name << " for task '" << taskId << "' failed: "
-                     << failure;
+                     << previousId << "' used for the " << name << " for"
+                     << " task '" << taskId << "' failed: " << failure;
 
         // Something went wrong while sending the request, we treat this
         // as a transient failure and discard the promise.
         promise->discard();
       }))
       .onReady(defer(self(),
-                     [this, promise, cmd, nested]
+                     [this, promise, cmd, nested, previousId]
                      (const http::Response& response) {
         if (response.code != http::Status::OK) {
           // The agent was unable to remove the check container, we
           // treat this as a transient failure and discard the promise.
           LOG(WARNING) << "Received '" << response.status << "' ("
                        << response.body << ") while removing the nested"
-                       << " container '" << previousCheckContainerId.get()
-                       << "' used for the " << name << " for task '"
-                       << taskId << "'";
+                       << " container '" << previousId << "' used for"
+                       << " the " << name << " for task '" << taskId << "'";
 
           promise->discard();
+        } else {
+          previousCheckContainerId = None();
+          _nestedCommandCheck(promise, cmd, nested);
         }
-
-        previousCheckContainerId = None();
-        _nestedCommandCheck(promise, cmd, nested);
       }));
   } else {
     _nestedCommandCheck(promise, cmd, nested);
@@ -795,7 +795,19 @@ void CheckerProcess::___nestedCommandCheck(
                  << launchResponse.body << ") while launching " << name
                  << " for task '" << taskId << "'";
 
-    promise->discard();
+    // We'll try to remove the container created for the check at the
+    // beginning of the next check. In order to prevent a failure, the
+    // promise should only be completed once we're sure that the
+    // container has terminated.
+    waitNestedContainer(checkContainerId, nested)
+      .onAny([promise](const Future<Option<int>>&) {
+        // We assume that once `WaitNestedContainer` returns,
+        // irrespective of whether the response contains a failure, the
+        // container will be in a terminal state, and that it will be
+        // possible to remove it.
+        promise->discard();
+    });
+
     return;
   }
 
@@ -881,7 +893,10 @@ void CheckerProcess::nestedCommandCheckFailure(
     //
     // This will allow us to recover from a blip. The executor will
     // pause the checker when it detects that the agent is not
-    // available.
+    // available. Here we do not need to wait the check container since
+    // the agent may have been unavailable, and when the agent is back,
+    // it will destroy the check container as orphan container, and we
+    // will eventually remove it in `nestedCommandCheck()`.
     LOG(WARNING) << "Connection to the agent to launch " << name
                  << " for task '" << taskId << "' failed: " << failure;
 

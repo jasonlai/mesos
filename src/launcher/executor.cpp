@@ -82,6 +82,10 @@
 #include "internal/devolve.hpp"
 #include "internal/evolve.hpp"
 
+#ifdef ENABLE_LAUNCHER_SEALING
+#include "linux/memfd.hpp"
+#endif // ENABLE_LAUNCHER_SEALING
+
 #include "logging/logging.hpp"
 
 #include "messages/messages.hpp"
@@ -131,6 +135,7 @@ public:
       const Option<Environment>& _taskEnvironment,
       const Option<CapabilityInfo>& _effectiveCapabilities,
       const Option<CapabilityInfo>& _boundingCapabilities,
+      const Option<string>& _ttySlavePath,
       const FrameworkID& _frameworkId,
       const ExecutorID& _executorId,
       const Duration& _shutdownGracePeriod)
@@ -155,6 +160,7 @@ public:
       taskEnvironment(_taskEnvironment),
       effectiveCapabilities(_effectiveCapabilities),
       boundingCapabilities(_boundingCapabilities),
+      ttySlavePath(_ttySlavePath),
       frameworkId(_frameworkId),
       executorId(_executorId),
       lastTaskStatus(None()) {}
@@ -406,7 +412,8 @@ protected:
       const Option<string>& sandboxDirectory,
       const Option<string>& workingDirectory,
       const Option<CapabilityInfo>& effectiveCapabilities,
-      const Option<CapabilityInfo>& boundingCapabilities)
+      const Option<CapabilityInfo>& boundingCapabilities,
+      const Option<string>& ttySlavePath)
   {
     // Prepare the flags to pass to the launch process.
     slave::MesosContainerizerLaunch::Flags launchFlags;
@@ -475,14 +482,20 @@ protected:
 
     launchFlags.launch_info = JSON::protobuf(launchInfo);
 
-    // TODO(tillt): Consider using a flag allowing / disallowing the
-    // log output of possibly sensitive data. See MESOS-7292.
-    string commandString = strings::format(
-        "%s %s <POSSIBLY-SENSITIVE-DATA>",
-        path::join(launcherDir, MESOS_CONTAINERIZER),
-        MesosContainerizerLaunch::NAME).get();
+    // Determine the mesos containerizer binary depends on whether we
+    // need to clone and seal it on linux.
+    string initPath = path::join(launcherDir, MESOS_CONTAINERIZER);
+#ifdef ENABLE_LAUNCHER_SEALING
+    // Clone the launcher binary in memory for security concerns.
+    Try<int_fd> memFd = memfd::cloneSealedFile(initPath);
+    if (memFd.isError()) {
+      ABORT(
+          "Failed to clone a sealed file '" + initPath + "' in memory: " +
+          memFd.error());
+    }
 
-    LOG(INFO) << "Running '" << commandString << "'";
+    initPath = "/proc/self/fd/" + stringify(memFd.get());
+#endif // ENABLE_LAUNCHER_SEALING
 
     // Fork the child using launcher.
     vector<string> argv(2);
@@ -499,8 +512,13 @@ protected:
         [](pid_t pid) { return os::set_job_kill_on_close_limit(pid); }));
 #endif // __WINDOWS__
 
+    vector<process::Subprocess::ChildHook> childHooks;
+    if (ttySlavePath.isNone()) {
+      childHooks.emplace_back(Subprocess::ChildHook::SETSID());
+    }
+
     Try<Subprocess> s = subprocess(
-        path::join(launcherDir, MESOS_CONTAINERIZER),
+        initPath,
         argv,
         Subprocess::FD(STDIN_FILENO),
         Subprocess::FD(STDOUT_FILENO),
@@ -509,10 +527,10 @@ protected:
         None(),
         None(),
         parentHooks,
-        {Subprocess::ChildHook::SETSID()});
+        childHooks);
 
     if (s.isError()) {
-      ABORT("Failed to launch '" + commandString + "': " + s.error());
+      ABORT("Failed to launch task subprocess: " + s.error());
     }
 
     return s->pid();
@@ -673,7 +691,8 @@ protected:
         sandboxDirectory,
         workingDirectory,
         effectiveCapabilities,
-        boundingCapabilities);
+        boundingCapabilities,
+        ttySlavePath);
 
     LOG(INFO) << "Forked command at " << pid.get();
 
@@ -1203,6 +1222,7 @@ private:
   Option<Environment> taskEnvironment;
   Option<CapabilityInfo> effectiveCapabilities;
   Option<CapabilityInfo> boundingCapabilities;
+  Option<string> ttySlavePath;
   const FrameworkID frameworkId;
   const ExecutorID executorId;
   Owned<MesosBase> mesos;
@@ -1262,6 +1282,10 @@ public:
         "bounding_capabilities",
         "The bounding set of capabilities the command can use.");
 
+    add(&Flags::tty_slave_path,
+        "tty_slave_path",
+        "A path to the slave end of the attached TTY if there is one.");
+
     add(&Flags::launcher_dir,
         "launcher_dir",
         "Directory path of Mesos binaries.",
@@ -1279,6 +1303,7 @@ public:
   Option<Environment> task_environment;
   Option<mesos::CapabilityInfo> effective_capabilities;
   Option<mesos::CapabilityInfo> bounding_capabilities;
+  Option<string> tty_slave_path;
   string launcher_dir;
 };
 
@@ -1356,6 +1381,7 @@ int main(int argc, char** argv)
           flags.task_environment,
           flags.effective_capabilities,
           flags.bounding_capabilities,
+          flags.tty_slave_path,
           frameworkId,
           executorId,
           shutdownGracePeriod));

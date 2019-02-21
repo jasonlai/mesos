@@ -919,12 +919,25 @@ Try<string> read(
     const string& cgroup,
     const string& control)
 {
-  Option<Error> error = verify(hierarchy, cgroup, control);
-  if (error.isSome()) {
-    return error.get();
+  Try<string> read = internal::read(hierarchy, cgroup, control);
+
+  // It turns out that `verify()` is expensive, so rather than
+  // verifying *prior* to the read, as is currently done for other
+  // cgroup helpers, we only verify if the read fails. This ensures
+  // we still provide a good error message. See: MESOS-8418.
+  //
+  // TODO(bmahler): Longer term, verification should be done
+  // explicitly by the caller, or its performance should be
+  // improved, or verification could be done consistently
+  // post-failure, as done here.
+  if (read.isError()) {
+    Option<Error> error = verify(hierarchy, cgroup, control);
+    if (error.isSome()) {
+      return error.get();
+    }
   }
 
-  return internal::read(hierarchy, cgroup, control);
+  return read;
 }
 
 
@@ -1199,7 +1212,7 @@ public:
       // uint64_t) from the event file, it indicates that an event has
       // occurred.
       reading = io::read(eventfd.get(), &data, sizeof(data));
-      reading.onAny(defer(self(), &Listener::_listen));
+      reading->onAny(defer(self(), &Listener::_listen, lambda::_1));
     }
 
     return promise.get()->future();
@@ -1221,14 +1234,23 @@ protected:
   virtual void finalize()
   {
     // Discard the nonblocking read.
-    reading.discard();
+    if (reading.isSome()) {
+      reading->discard();
+    }
 
-    // Unregister the eventfd if needed.
+    // Unregister the eventfd if needed. If there's a pending read,
+    // we must wait for it to finish.
     if (eventfd.isSome()) {
-      Try<Nothing> unregister = unregisterNotifier(eventfd.get());
-      if (unregister.isError()) {
-        LOG(ERROR) << "Failed to unregister eventfd: " << unregister.error();
-      }
+      int fd = eventfd.get();
+
+      reading.getOrElse(Future<size_t>(0))
+        .onAny([fd]() {
+          Try<Nothing> unregister = unregisterNotifier(fd);
+          if (unregister.isError()) {
+            LOG(ERROR) << "Failed to unregister eventfd '" << fd << "'"
+                       << ": " << unregister.error();
+          }
+      });
     }
 
     // TODO(chzhcn): Fail our promise only after 'reading' has
@@ -1241,11 +1263,15 @@ protected:
 private:
   // This function is called when the nonblocking read on the eventfd has
   // result, either because the event has happened, or an error has occurred.
-  void _listen()
+  void _listen(Future<size_t> read)
   {
     CHECK_SOME(promise);
+    CHECK_SOME(reading);
 
-    if (reading.isReady() && reading.get() == sizeof(data)) {
+    // Reset to none since we're no longer reading.
+    reading = None();
+
+    if (read.isReady() && read.get() == sizeof(data)) {
       promise.get()->set(data);
 
       // After fulfilling the promise, reset to get ready for the next one.
@@ -1253,14 +1279,14 @@ private:
       return;
     }
 
-    if (reading.isDiscarded()) {
+    if (read.isDiscarded()) {
       error = Error("Reading eventfd stopped unexpectedly");
-    } else if (reading.isFailed()) {
-      error = Error("Failed to read eventfd: " + reading.failure());
+    } else if (read.isFailed()) {
+      error = Error("Failed to read eventfd: " + read.failure());
     } else {
       error = Error("Read less than expected. Expect " +
                     stringify(sizeof(data)) + " bytes; actual " +
-                    stringify(reading.get()) + " bytes");
+                    stringify(read.get()) + " bytes");
     }
 
     // Inform failure and not listen again.
@@ -1273,7 +1299,7 @@ private:
   const Option<string> args;
 
   Option<Owned<Promise<uint64_t>>> promise;
-  Future<size_t> reading;
+  Option<Future<size_t>> reading;
   Option<Error> error;
   Option<int> eventfd;
   uint64_t data;                // The data read from the eventfd last time.
@@ -1956,7 +1982,8 @@ static bool isOperation(const string& s)
           s == "Read" ||
           s == "Write" ||
           s == "Sync" ||
-          s == "Async");
+          s == "Async" ||
+          s == "Discard");
 }
 
 
@@ -1972,6 +1999,8 @@ static Try<Operation> parseOperation(const string& s)
     return Operation::SYNC;
   } else if (s == "Async") {
     return Operation::ASYNC;
+  } else if (s == "Discard") {
+    return Operation::DISCARD;
   }
 
   return Error("Invalid Operation value: '" + s + "'");

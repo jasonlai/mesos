@@ -18,7 +18,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.61])
-AC_INIT([mesos], [1.6.0])
+AC_INIT([mesos], [1.6.2])
 
 # Have autoconf setup some variables related to the system.
 AC_CANONICAL_HOST
@@ -226,6 +226,17 @@ AC_ARG_ENABLE([last_in_first_out_fixed_size_semaphore],
               AS_HELP_STRING([--enable-last-in-first-out-fixed-size-semaphore],
                              [enables the optimized LIFO fixed-size semaphore in libprocess]),
                              [], [enable_last_in_first_out_fixed_size_semaphore=no])
+
+AC_ARG_ENABLE([launcher_sealing],
+              AS_HELP_STRING([--enable-launcher-sealing],
+                             [Enables sealing of launcher binary during
+                              initialization of Mesos containerizer.
+                              A copy of launcher's binary is cloned into
+                              memory and sealed to prevent overwriting of
+                              launcher's executable by containers.
+                              This is a Linux-specific feature and requires
+                              the support of memfd by the kernel.]),
+                             [], [enable_launcher_sealing=no])
 
 AC_ARG_ENABLE([libevent],
               AS_HELP_STRING([--enable-libevent],
@@ -1246,11 +1257,19 @@ __EOF__
   # Determine linker flags for Java if not set.
   if test "$OS_NAME" = "darwin"; then
     dir="$JAVA_HOME/jre/lib/server"
-    JAVA_TEST_LDFLAGS="-framework JavaVM"
-    JAVA_JVM_LIBRARY=$dir/libjvm.dylib
+    for dir in "$JAVA_HOME/lib/server" "$JAVA_HOME/jre/lib/server"; do
+      if test -e "$dir"; then
+	# Note that these are libtool specific flags.
+        JAVA_TEST_LDFLAGS="-framework JavaVM"
+        JAVA_JVM_LIBRARY=$dir/libjvm.dylib
+	break;
+      fi
+    done
   elif test "$OS_NAME" = "linux"; then
-    for arch in amd64 i386 arm aarch64 ppc64 ppc64le s390 s390x; do
-      dir="$JAVA_HOME/jre/lib/$arch/server"
+    for dir in \
+      "$JAVA_HOME/lib/server" \
+      "$JAVA_HOME/jre/lib/"{amd64,i386,arm,aarch64,ppc64,ppc64le,s390,s390x}"/server"
+    do
       if test -e "$dir"; then
 	# Note that these are libtool specific flags.
 	JAVA_TEST_LDFLAGS="-L$dir -R$dir -Wl,-ljvm"
@@ -1359,6 +1378,8 @@ has been correctly installed.
 fi
 
 AM_CONDITIONAL([HAS_JAVA], [test "x$has_java" = "xyes"])
+AC_PATH_PROG([JAVAH], [javah], [$JAVAH], [$JAVA_HOME/bin])
+AM_CONDITIONAL([HAS_JAVAH], [test "x$JAVAH" != "x"])
 
 
 # Check if LevelDB prefix path was supplied and if so, add it to
@@ -1401,6 +1422,26 @@ fi
 
 AM_CONDITIONAL([WITH_BUNDLED_LEVELDB],
                [test "x$with_bundled_leveldb" = "xyes"])
+
+
+# Check if we should use containerizer launcher sealing.
+AC_MSG_CHECKING([whether to enable launcher sealing])
+AC_MSG_RESULT([$enable_launcher_sealing])
+
+AS_IF([test "x$enable_launcher_sealing" = "xyes"], [
+  # We only support launcher sealing on Linux.
+  AS_IF([test "$OS_NAME" = "linux"],
+        [],
+        [AC_MSG_ERROR([no launcher sealing support on $OS_NAME
+-------------------------------------------------------------------
+Launcher sealing is only supported on Linux.
+-------------------------------------------------------------------
+  ])])
+
+  AC_DEFINE([ENABLE_LAUNCHER_SEALING])
+])
+
+AM_CONDITIONAL([ENABLE_LAUNCHER_SEALING], [test "x$enable_launcher_sealing" = "xyes"])
 
 
 # Check if libevent prefix path was provided, and if so, add it to
@@ -2599,4 +2640,6 @@ AC_MSG_NOTICE([Build option summary:
     CPPFLAGS:   $CPPFLAGS
     LDFLAGS:    $LDFLAGS
     LIBS:       $LIBS
+    JAVA_TEST_LDFLAGS: $JAVA_TEST_LDFLAGS
+    JAVA_JVM_LIBRARY:  $JAVA_JVM_LIBRARY
 ])

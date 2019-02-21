@@ -41,6 +41,7 @@
 #include "master/allocator/mesos/metrics.hpp"
 
 #include "master/allocator/sorter/drf/sorter.hpp"
+#include "master/allocator/sorter/random/sorter.hpp"
 
 #include "master/constants.hpp"
 
@@ -62,6 +63,12 @@ HierarchicalDRFAllocatorProcess;
 
 typedef MesosAllocator<HierarchicalDRFAllocatorProcess>
 HierarchicalDRFAllocator;
+
+typedef HierarchicalAllocatorProcess<RandomSorter, RandomSorter, RandomSorter>
+HierarchicalRandomAllocatorProcess;
+
+typedef MesosAllocator<HierarchicalRandomAllocatorProcess>
+HierarchicalRandomAllocator;
 
 
 namespace internal {
@@ -107,7 +114,9 @@ public:
       const Option<std::set<std::string>>&
         fairnessExcludeResourceNames = None(),
       bool filterGpuResources = true,
-      const Option<DomainInfo>& domain = None());
+      const Option<DomainInfo>& domain = None(),
+      const Option<std::vector<mesos::internal::ResourceQuantities>>&
+        minAllocatableResources = None());
 
   void recover(
       const int _expectedAgentCount,
@@ -283,7 +292,7 @@ protected:
       const FrameworkID& frameworkID,
       const SlaveID& slaveID) const;
 
-  static bool allocatable(const Resources& resources);
+  bool allocatable(const Resources& resources);
 
   // Returns true if the given role is filtered out of the particular agent.
   // Uber specific for now.
@@ -353,42 +362,54 @@ protected:
 
   hashmap<FrameworkID, Framework> frameworks;
 
-  struct Slave
+  class Slave
   {
-    // Total amount of regular *and* oversubscribed resources.
-    Resources total;
-
-    // Regular *and* oversubscribed resources that are allocated.
-    //
-    // NOTE: We maintain multiple copies of each shared resource allocated
-    // to a slave, where the number of copies represents the number of times
-    // this shared resource has been allocated to (and has not been recovered
-    // from) a specific framework.
-    //
-    // NOTE: We keep track of slave's allocated resources despite
-    // having that information in sorters. This is because the
-    // information in sorters is not accurate if some framework
-    // hasn't reregistered. See MESOS-2919 for details.
-    Resources allocated;
-
-    // We track the total and allocated resources on the slave, the
-    // available resources are computed as follows:
-    //
-    //   available = total - allocated
-    //
-    // Note that it's possible for the slave to be over-allocated!
-    // In this case, allocated > total.
-    Resources available() const
+  public:
+    Slave(
+        const SlaveInfo& _info,
+        const protobuf::slave::Capabilities& _capabilities,
+        bool _activated,
+        const Resources& _total,
+        const Resources& _allocated)
+      : info(_info),
+        capabilities(_capabilities),
+        activated(_activated),
+        total(_total),
+        allocated(_allocated)
     {
       // In order to subtract from the total,
       // we strip the allocation information.
       Resources allocated_ = allocated;
       allocated_.unallocate();
 
-      return total - allocated_;
+      available = total - allocated_;
     }
 
-    bool activated;  // Whether to offer resources.
+    Resources getTotal() const { return total; }
+
+    Resources getAllocated() const { return allocated; }
+
+    Resources getAvailable() const { return available; }
+
+    void updateTotal(const Resources& newTotal) {
+      total = newTotal;
+
+      updateAvailable();
+    }
+
+    void allocate(const Resources& toAllocate)
+    {
+      allocated += toAllocate;
+
+      updateAvailable();
+    }
+
+    void unallocate(const Resources& toUnallocate)
+    {
+      allocated -= toUnallocate;
+
+      updateAvailable();
+    }
 
     // The `SlaveInfo` that was passed to the allocator when the slave was added
     // or updated. Currently only two fields are used: `hostname` for host
@@ -397,6 +418,8 @@ protected:
     SlaveInfo info;
 
     protobuf::slave::Capabilities capabilities;
+
+    bool activated; // Whether to offer resources.
 
     // Represents a scheduled unavailability due to maintenance for a specific
     // slave, and the responses from frameworks as to whether they will be able
@@ -433,6 +456,41 @@ protected:
     // a given point in time, for an optional duration. This information is used
     // to send out `InverseOffers`.
     Option<Maintenance> maintenance;
+
+  private:
+    void updateAvailable() {
+      // In order to subtract from the total,
+      // we strip the allocation information.
+      Resources allocated_ = allocated;
+      allocated_.unallocate();
+
+      available = total - allocated_;
+    }
+
+    // Total amount of regular *and* oversubscribed resources.
+    Resources total;
+
+    // Regular *and* oversubscribed resources that are allocated.
+    //
+    // NOTE: We maintain multiple copies of each shared resource allocated
+    // to a slave, where the number of copies represents the number of times
+    // this shared resource has been allocated to (and has not been recovered
+    // from) a specific framework.
+    //
+    // NOTE: We keep track of the slave's allocated resources despite
+    // having that information in sorters. This is because the
+    // information in sorters is not accurate if some framework
+    // hasn't reregistered. See MESOS-2919 for details.
+    Resources allocated;
+
+    // We track the total and allocated resources on the slave, the
+    // available resources are computed as follows:
+    //
+    //   available = total - allocated
+    //
+    // Note that it's possible for the slave to be over-allocated!
+    // In this case, allocated > total.
+    Resources available;
   };
 
   hashmap<SlaveID, Slave> slaves;
@@ -470,7 +528,8 @@ protected:
   // particular role, if any. These are stripped scalar quantities
   // that contain no meta-data.
   //
-  // Only roles with non-empty reservations will be stored in the map.
+  // Only roles with non-empty scalar reservation quantities will
+  // be stored in the map.
   hashmap<std::string, Resources> reservationScalarQuantities;
 
   // Slaves to send offers for.
@@ -484,6 +543,10 @@ protected:
 
   // The master's domain, if any.
   Option<DomainInfo> domain;
+
+  // The minimum allocatable resources, if any.
+  Option<std::vector<mesos::internal::ResourceQuantities>>
+    minAllocatableResources;
 
   // There are two stages of allocation:
   //

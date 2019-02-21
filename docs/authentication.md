@@ -64,6 +64,10 @@ Mesos master and agent processes. For more information, refer to the
   allowed to register. If `false` (the default), unauthenticated agents are also
   allowed to register.
 
+* `--authentication_v0_timeout` - The timeout within which an authentication is
+  expected to complete against a v0 framework or agent. This does not apply to
+  the v0 or v1 HTTP APIs.(default: `15secs`)
+
 * `--authenticators` - Specifies which authenticator module to use.  The default
   is `crammd5`, but additional modules can be added using the `--modules`
   option.
@@ -110,6 +114,39 @@ Mesos master and agent processes. For more information, refer to the
 * `--http_credentials` - The path to a text file which contains a list (in JSON
   format) of accepted credentials.  This may be optional depending on the
   authenticator being used.
+
+* `--authentication_backoff_factor` - The agent will time out its authentication
+  with the master based on exponential backoff. The timeout will be randomly
+  chosen within the range `[min, min + factor*2^n]` where `n` is the number of
+  failed attempts. To tune these parameters, set the
+  `--authentication_timeout_[min|max|factor]` flags. (default: 1secs)
+
+* `--authentication_timeout_min` - The minimum amount of time the agent waits
+  before retrying authenticating with the master. See
+  `--authentication_backoff_factor` for more details. (default: 5secs)
+
+* `--authentication_timeout_max` - The maximum amount of time the agent waits
+  before retrying authenticating with the master. See
+  `--authentication_backoff_factor` for more details. (default: 1mins)
+
+### Scheduler Driver
+
+* `--authenticatee` - Analog to the master's `--authenticators` option to
+  specify what module to use.  Defaults to `crammd5`.
+
+* `--authentication_backoff_factor` - The scheduler will time out its
+  authentication with the master based on exponential backoff. The timeout will
+  be randomly chosen within the range `[min, min + factor*2^n]` where `n` is
+  the number of failed attempts. To tune these parameters, set the
+  `--authentication_timeout_[min|max|factor]` flags. (default: 1secs)
+
+* `--authentication_timeout_min` - The minimum amount of time the scheduler
+  waits before retrying authenticating with the master. See
+  `--authentication_backoff_factor` for more details. (default: 5secs)
+
+* `--authentication_timeout_max` - The maximum amount of time the scheduler
+  waits before retrying authenticating with the master. See
+  `--authentication_backoff_factor` for more details. (default: 1mins)
 
 ### Multiple HTTP Authenticators
 

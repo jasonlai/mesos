@@ -19,6 +19,7 @@
 
 #include <stdint.h>
 
+#include <algorithm>
 #include <list>
 #include <memory>
 #include <set>
@@ -44,6 +45,8 @@
 
 #include <mesos/scheduler/scheduler.hpp>
 
+#include <process/collect.hpp>
+#include <process/future.hpp>
 #include <process/limiter.hpp>
 #include <process/http.hpp>
 #include <process/owned.hpp>
@@ -2204,6 +2207,18 @@ private:
 };
 
 
+// Collects authorization results. Any discarded or failed future
+// results in a failure; any false future results in false.
+inline process::Future<bool> collectAuthorizations(
+    const std::list<process::Future<bool>>& authorizations)
+{
+  return process::collect(authorizations)
+    .then([](const std::list<bool>& results) -> process::Future<bool> {
+      return std::find(results.begin(), results.end(), false) == results.end();
+    });
+}
+
+
 inline std::ostream& operator<<(
     std::ostream& stream,
     const Framework& framework);
@@ -2372,8 +2387,21 @@ struct Framework
   void send(const Message& message)
   {
     if (!connected()) {
-      LOG(WARNING) << "Master attempted to send message to disconnected"
+      LOG(WARNING) << "Master attempting to send message to disconnected"
                    << " framework " << *this;
+
+      // NOTE: We proceed here without returning to support the case where a
+      // "disconnected" framework is still talking to the master and the master
+      // wants to shut it down by sending a `FrameworkErrorMessage`. This can
+      // occur in a one-way network partition where the master -> framework link
+      // is broken but the framework -> master link remains intact. Note that we
+      // have no periodic heartbeats between the master and pid-based
+      // schedulers.
+      //
+      // TODO(chhsiao): Update the `FrameworkErrorMessage` call-sites that rely
+      // on the lack of a `return` here to directly call `process::send` so that
+      // this function doesn't need to deal with the special case. Then we can
+      // check that one of `http` or `pid` is set if the framework is connected.
     }
 
     if (http.isSome()) {
@@ -2381,9 +2409,11 @@ struct Framework
         LOG(WARNING) << "Unable to send event to framework " << *this << ":"
                      << " connection closed";
       }
-    } else {
-      CHECK_SOME(pid);
+    } else if (pid.isSome()) {
       master->send(pid.get(), message);
+    } else {
+      LOG(WARNING) << "Unable to send message to framework " << *this << ":"
+                   << " framework is recovered but has not reregistered";
     }
   }
 

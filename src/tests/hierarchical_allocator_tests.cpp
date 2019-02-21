@@ -40,6 +40,8 @@
 #include <stout/stopwatch.hpp>
 #include <stout/utils.hpp>
 
+#include "common/resource_quantities.hpp"
+
 #include "master/constants.hpp"
 #include "master/flags.hpp"
 
@@ -60,6 +62,8 @@ using mesos::internal::master::allocator::HierarchicalDRFAllocator;
 using mesos::internal::protobuf::createLabel;
 
 using mesos::internal::slave::AGENT_CAPABILITIES;
+
+using mesos::internal::ResourceQuantities;
 
 using mesos::allocator::Allocator;
 
@@ -176,11 +180,21 @@ protected:
         };
     }
 
+    vector<ResourceQuantities> minAllocatableResources;
+    minAllocatableResources.push_back(CHECK_NOTERROR(
+        ResourceQuantities::fromString("cpus:" + stringify(MIN_CPUS))));
+    minAllocatableResources.push_back(
+        CHECK_NOTERROR(ResourceQuantities::fromString(
+            "mem:" + stringify((double)MIN_MEM.bytes() / Bytes::MEGABYTES))));
+
     allocator->initialize(
         flags.allocation_interval,
         offerCallback.get(),
         inverseOfferCallback.get(),
-        flags.fair_sharing_excluded_resource_names);
+        flags.fair_sharing_excluded_resource_names,
+        true,
+        None(),
+        minAllocatableResources);
   }
 
   SlaveInfo createSlaveInfo(const Resources& resources)
@@ -2708,6 +2722,47 @@ TEST_F(HierarchicalAllocatorTest, UpdateSlaveCapabilities)
       {{"role1", {{agent.id(), agent.resources()}}}});
 
   AWAIT_EXPECT_EQ(expected, allocation);
+}
+
+
+// This is a regression test for MESOS-9555 that ensures that
+// the tracking of non-scalar reservations across agents does
+// not lead to a CHECK failure.
+TEST_F(HierarchicalAllocatorTest, NonScalarReservationTrackingMESOS_9555)
+{
+  // Pause clock to disable batch allocation.
+  Clock::pause();
+
+  initialize();
+
+  // Have only non-scalar (ports) reserved for a role.
+  Resources resources = CHECK_NOTERROR(Resources::parse(
+      "cpus:1;mem:1;disk:1;ports(role):[1-2]"));
+
+  SlaveInfo agent1 = createSlaveInfo(resources);
+
+  allocator->addSlave(
+      agent1.id(),
+      agent1,
+      AGENT_CAPABILITIES(),
+      None(),
+      agent1.resources(),
+      {});
+
+  SlaveInfo agent2 = createSlaveInfo(resources);
+
+  allocator->addSlave(
+      agent2.id(),
+      agent2,
+      AGENT_CAPABILITIES(),
+      None(),
+      agent2.resources(),
+      {});
+
+  allocator->removeSlave(agent1.id());
+  allocator->removeSlave(agent2.id());
+
+  Clock::settle();
 }
 
 

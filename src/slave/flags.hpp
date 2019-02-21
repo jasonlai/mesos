@@ -79,6 +79,8 @@ public:
   std::string frameworks_home;  // TODO(benh): Make an Option.
   Duration registration_backoff_factor;
   Duration authentication_backoff_factor;
+  Duration authentication_timeout_min;
+  Duration authentication_timeout_max;
   Option<JSON::Object> executor_environment_variables;
   Duration executor_registration_timeout;
   Duration executor_reregistration_timeout;
@@ -160,6 +162,7 @@ public:
 
   Option<std::string> network_cni_plugins_dir;
   Option<std::string> network_cni_config_dir;
+  bool network_cni_root_dir_persist;
   Duration container_disk_watch_interval;
   bool enforce_container_disk_quota;
   Option<Modules> modules;

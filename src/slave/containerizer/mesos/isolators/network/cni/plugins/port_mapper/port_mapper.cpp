@@ -16,6 +16,7 @@
 
 #include <stout/os.hpp>
 #include <stout/protobuf.hpp>
+#include <stout/stringify.hpp>
 
 #include <stout/os/which.hpp>
 
@@ -70,9 +71,10 @@ Try<Owned<PortMapper>, PluginError> PortMapper::create(const string& _cniConfig)
   }
 
   Option<string> cniNetNs = os::getenv("CNI_NETNS");
-  if (cniNetNs.isNone()) {
+  if (cniNetNs.isNone() && cniCommand.get() != spec::CNI_CMD_DEL) {
     return PluginError(
-        "Unable to find environment variable 'CNI_NETNS'",
+        "Unable to find environment variable 'CNI_NETNS' for "
+        "non-'" + stringify(spec::CNI_CMD_DEL) + "' command",
         ERROR_BAD_ARGS);
   }
 
@@ -234,7 +236,7 @@ Try<Owned<PortMapper>, PluginError> PortMapper::create(const string& _cniConfig)
       new PortMapper(
           cniCommand.get(),
           cniContainerId.get(),
-          cniNetNs.get(),
+          cniNetNs,
           cniIfName.get(),
           cniArgs,
           cniPath.get(),
@@ -342,7 +344,7 @@ Try<Nothing> PortMapper::addPortMapping(
 
       # Within the `chain` go ahead and install the DNAT rule, if it
       # does not exist.
-      (iptables -w -t nat -C %s || iptables -t nat -A %s))~",
+      (iptables -w -t nat -C %s || iptables -w -t nat -A %s))~",
       chain,
       chain,
       chain,
@@ -360,16 +362,38 @@ Try<Nothing> PortMapper::addPortMapping(
 
 Try<Nothing> PortMapper::delPortMapping()
 {
+  // The iptables command searches for the DNAT rules with tag
+  // "container_id: <CNI_CONTAINERID>", and if it exists goes ahead
+  // and deletes it.
+  //
+  // NOTE: We use a temp file here, instead of letting `sed` directly
+  // executing the iptables commands because otherwise, it is possible
+  // that the port mapping cleanup command will cause iptables to
+  // deadlock if there are a lot of entires in the iptables, because
+  // the `sed` won't process the next line while executing `iptables
+  // -w -t nat -D ...`. But the executing of `iptables -w -t nat -D
+  // ...` might get stuck if the first command `iptables -w -t nat -S
+  // <TAG>` didn't finish (because the xtables lock is not released).
+  // The first command might not finish if it has a lot of output,
+  // filling the pipe that `sed` hasn't had a chance to process yet.
+  // See details in MESOS-9127.
   string script = strings::format(
       R"~(
       #!/bin/sh
-      exec 1>&2
       set -x
+      set -e
 
-      # The iptables command searches for the DNAT rules with tag
-      # "container_id: <CNI_CONTAINERID>", and if it exists goes ahead
-      # and deletes it.
-      iptables -w -t nat -S %s | sed "/%s/ s/-A/iptables -w -t nat -D/e")~",
+      FILE=$(mktemp)
+
+      cleanup() {
+        rm -f "$FILE"
+      }
+
+      trap cleanup EXIT
+
+      iptables -w -t nat -S %s | sed -n "/%s/ s/-A/iptables -w -t nat -D/p" > $FILE
+      sh $FILE
+      )~",
       chain,
       getIptablesRuleTag()).get();
 
@@ -503,9 +527,12 @@ Result<spec::NetworkInfo> PortMapper::delegate(const string& command)
 
   environment["CNI_COMMAND"] = command;
   environment["CNI_IFNAME"] = cniIfName;
-  environment["CNI_NETNS"] = cniNetNs;
   environment["CNI_PATH"] = cniPath;
   environment["CNI_CONTAINERID"] = cniContainerId;
+
+  if (cniNetNs.isSome()) {
+    environment["CNI_NETNS"] = cniNetNs.get();
+  }
 
   if (cniArgs.isSome()) {
     environment["CNI_ARGS"] = cniArgs.get();

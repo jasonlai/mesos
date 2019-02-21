@@ -81,11 +81,6 @@ public:
   virtual process::Future<Nothing> cleanup(
       const ContainerID& containerId);
 
-protected:
-  virtual void initialize();
-
-  virtual void finalize();
-
 private:
   struct Info
   {
@@ -107,7 +102,8 @@ private:
   CgroupsIsolatorProcess(
       const Flags& _flags,
       const hashmap<std::string, std::string>& _hierarchies,
-      const multihashmap<std::string, process::Owned<Subsystem>>& _subsystems);
+      const multihashmap<std::string, process::Owned<Subsystem>>&
+        _subsystems);
 
   process::Future<Nothing> _recover(
       const hashset<ContainerID>& orphans,
